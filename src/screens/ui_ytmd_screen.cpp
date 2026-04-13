@@ -19,6 +19,16 @@
 // Forward declaration (defined in ui_settings_screens.cpp)
 lv_obj_t* createSettingsSidebar(lv_obj_t* screen, int activeIdx);
 
+static String sanitizeYtmdIP(lv_obj_t* ta_ip)
+{
+    String ip = String(lv_textarea_get_text(ta_ip));
+    if (ip.indexOf(';') >= 0) {
+        ip.replace(';', '.');
+        lv_textarea_set_text(ta_ip, ip.c_str());
+    }
+    return ip;
+}
+
 // ============================================================================
 // createYTMDScreen
 // ============================================================================
@@ -49,6 +59,7 @@ void createYTMDScreen() {
     lv_obj_t* ta_ip = lv_textarea_create(content);
     lv_obj_set_size(ta_ip, lv_pct(100), 48);
     lv_textarea_set_one_line(ta_ip, true);
+    lv_textarea_set_accepted_chars(ta_ip, "0123456789.");
     lv_textarea_set_placeholder_text(ta_ip, "192.168.1.xxx");
     lv_textarea_set_text(ta_ip, ytmd_ip.c_str());
     lv_obj_set_style_bg_color(ta_ip, lv_color_hex(0x2A2A2A), 0);
@@ -69,6 +80,7 @@ void createYTMDScreen() {
     lv_obj_t* ta_port = lv_textarea_create(content);
     lv_obj_set_size(ta_port, lv_pct(100), 48);
     lv_textarea_set_one_line(ta_port, true);
+    lv_textarea_set_accepted_chars(ta_port, "0123456789");
     lv_textarea_set_placeholder_text(ta_port, "26538");
     lv_textarea_set_text(ta_port, String(ytmd_port).c_str());
     lv_obj_set_style_bg_color(ta_port, lv_color_hex(0x2A2A2A), 0);
@@ -85,6 +97,7 @@ void createYTMDScreen() {
     lv_obj_set_size(ytmd_kb, 800, 200);
     lv_obj_align(ytmd_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_add_flag(ytmd_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_keyboard_set_mode(ytmd_kb, LV_KEYBOARD_MODE_NUMBER);  // Always open numeric keypad first
     lv_obj_set_style_bg_color(ytmd_kb, lv_color_hex(0x1A1A1A), 0);
 
     // Static pointers used by keyboard save handlers and auth button
@@ -92,33 +105,34 @@ void createYTMDScreen() {
     ta_ptrs[0] = ta_ip;
     ta_ptrs[1] = ta_port;
 
-    // Helper: save IP+port from text areas to globals and NVS
-    auto saveSettings = []() {
-        ytmd_ip   = String(lv_textarea_get_text(ta_ptrs[0]));
-        ytmd_port = atoi(lv_textarea_get_text(ta_ptrs[1]));
-        if (ytmd_port <= 0) ytmd_port = YTMD_DEFAULT_PORT;
-        wifiPrefs.putString(NVS_KEY_YTMD_IP,   ytmd_ip);
-        wifiPrefs.putInt   (NVS_KEY_YTMD_PORT, ytmd_port);
-        Serial.printf("[YTMD] Saved IP=%s Port=%d\n", ytmd_ip.c_str(), ytmd_port);
-    };
-
     // Show keyboard on focus
     lv_obj_add_event_cb(ta_ip, [](lv_event_t* e) {
         lv_obj_t* kb_obj = (lv_obj_t*)lv_event_get_user_data(e);
         lv_keyboard_set_textarea(kb_obj, (lv_obj_t*)lv_event_get_target(e));
+        lv_keyboard_set_mode(kb_obj, LV_KEYBOARD_MODE_NUMBER);
         lv_obj_clear_flag(kb_obj, LV_OBJ_FLAG_HIDDEN);
     }, LV_EVENT_FOCUSED, ytmd_kb);
 
     lv_obj_add_event_cb(ta_port, [](lv_event_t* e) {
         lv_obj_t* kb_obj = (lv_obj_t*)lv_event_get_user_data(e);
         lv_keyboard_set_textarea(kb_obj, (lv_obj_t*)lv_event_get_target(e));
+        lv_keyboard_set_mode(kb_obj, LV_KEYBOARD_MODE_NUMBER);
         lv_obj_clear_flag(kb_obj, LV_OBJ_FLAG_HIDDEN);
     }, LV_EVENT_FOCUSED, ytmd_kb);
+
+    lv_obj_add_event_cb(ta_ip, [](lv_event_t* e) {
+        lv_obj_t* ta = (lv_obj_t*)lv_event_get_target(e);
+        String ip = String(lv_textarea_get_text(ta));
+        if (ip.indexOf(';') >= 0) {
+            ip.replace(';', '.');
+            lv_textarea_set_text(ta, ip.c_str());
+        }
+    }, LV_EVENT_VALUE_CHANGED, NULL);
 
     // Save on Enter or close
     lv_obj_add_event_cb(ytmd_kb, [](lv_event_t* e) {
         lv_obj_add_flag((lv_obj_t*)lv_event_get_target(e), LV_OBJ_FLAG_HIDDEN);
-        ytmd_ip   = String(lv_textarea_get_text(ta_ptrs[0]));
+        ytmd_ip   = sanitizeYtmdIP(ta_ptrs[0]);
         ytmd_port = atoi(lv_textarea_get_text(ta_ptrs[1]));
         if (ytmd_port <= 0) ytmd_port = YTMD_DEFAULT_PORT;
         wifiPrefs.putString(NVS_KEY_YTMD_IP,   ytmd_ip);
@@ -128,7 +142,7 @@ void createYTMDScreen() {
 
     lv_obj_add_event_cb(ytmd_kb, [](lv_event_t* e) {
         lv_obj_add_flag((lv_obj_t*)lv_event_get_target(e), LV_OBJ_FLAG_HIDDEN);
-        ytmd_ip   = String(lv_textarea_get_text(ta_ptrs[0]));
+        ytmd_ip   = sanitizeYtmdIP(ta_ptrs[0]);
         ytmd_port = atoi(lv_textarea_get_text(ta_ptrs[1]));
         if (ytmd_port <= 0) ytmd_port = YTMD_DEFAULT_PORT;
         wifiPrefs.putString(NVS_KEY_YTMD_IP,   ytmd_ip);
@@ -235,7 +249,7 @@ void createYTMDScreen() {
 
     lv_obj_add_event_cb(btn_auth, [](lv_event_t* e) {
         // Persist current field values first
-        ytmd_ip   = String(lv_textarea_get_text(ta_ptrs[0]));
+        ytmd_ip   = sanitizeYtmdIP(ta_ptrs[0]);
         ytmd_port = atoi(lv_textarea_get_text(ta_ptrs[1]));
         if (ytmd_port <= 0) ytmd_port = YTMD_DEFAULT_PORT;
 
