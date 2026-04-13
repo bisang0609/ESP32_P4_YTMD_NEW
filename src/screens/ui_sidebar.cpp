@@ -51,12 +51,12 @@ lv_obj_t* createSettingsSidebar(lv_obj_t* screen, int activeIdx) {
     lv_obj_set_style_text_font(ico_x, &lv_font_mdi_16, 0);
     lv_obj_center(ico_x);
 
-    // Menu items (Order: General, Sources, Display, WiFi, Clock, YTMD)
-    const char* icons[] = {MDI_COG, MDI_PLAYLIST, MDI_MONITOR, MDI_WIFI, MDI_CLOCK_OUTLINE, MDI_MUSIC_NOTE};
-    const char* labels[] = {"General", "Sources", "Display", "WiFi", "Clock", "YTMD"};
+    // Menu items (Order: General, Display, WiFi, Clock, YTMD)
+    const char* icons[] = {MDI_COG, MDI_MONITOR, MDI_WIFI, MDI_CLOCK_OUTLINE, MDI_MUSIC_NOTE};
+    const char* labels[] = {"General", "Display", "WiFi", "Clock", "YTMD"};
 
     int y = 55;
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < 5; i++) {
         lv_obj_t* btn = lv_button_create(sidebar);
         lv_obj_set_size(btn, 164, 42);
         lv_obj_set_pos(btn, 8, y);
@@ -85,11 +85,10 @@ lv_obj_t* createSettingsSidebar(lv_obj_t* screen, int activeIdx) {
             int idx = (int)(intptr_t)lv_event_get_user_data(e);
             switch(idx) {
                 case 0: lv_screen_load(scr_general);        break;
-                case 1: lv_screen_load(scr_sources);        break;
-                case 2: lv_screen_load(scr_display);        break;
-                case 3: lv_screen_load(scr_wifi);           break;
-                case 4: lv_screen_load(scr_clock_settings); break;
-                case 5: lv_screen_load(scr_ytmd);           break;
+                case 1: lv_screen_load(scr_display);        break;
+                case 2: lv_screen_load(scr_wifi);           break;
+                case 3: lv_screen_load(scr_clock_settings); break;
+                case 4: lv_screen_load(scr_ytmd);           break;
             }
         }, LV_EVENT_CLICKED, (void*)(intptr_t)i);
 

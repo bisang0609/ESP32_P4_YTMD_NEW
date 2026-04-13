@@ -850,6 +850,142 @@ static void displayArt(const DecodeResult& dec, const char* url) {
     }
 }
 
+// Fetch artwork URL from pear-desktop API server.
+// Returns true when a non-empty image URL is found.
+static bool fetchPearDesktopImageSrc(String& outImageUrl) {
+    outImageUrl = "";
+    if (ytmd_ip.length() == 0 || ytmd_token.length() == 0) return false;
+
+    int port = ytmd_port > 0 ? ytmd_port : YTMD_DEFAULT_PORT;
+    const char* song_paths[] = {"/api/v1/song", "/api/v1/song-info"};
+    char auth_header[300];
+    snprintf(auth_header, sizeof(auth_header), "Bearer %s", ytmd_token.c_str());
+
+    for (size_t i = 0; i < (sizeof(song_paths) / sizeof(song_paths[0])); ++i) {
+        char api_url[192];
+        snprintf(api_url, sizeof(api_url), "http://%s:%d%s",
+                 ytmd_ip.c_str(), port, song_paths[i]);
+
+        HTTPClient http;
+        http.begin(api_url);
+        http.addHeader("Authorization", auth_header);
+        http.setTimeout(2500);
+        int code = http.GET();
+        Serial.printf("[ART] pear-desktop GET %s -> HTTP %d\n", api_url, code);
+
+        if (code == 404) {
+            http.end();
+            continue;
+        }
+        if (code != 200) {
+            Serial.printf("[ART] pear endpoint non-200 (%d), path=%s\n", code, song_paths[i]);
+            http.end();
+            return false;
+        }
+
+        String resp = http.getString();
+        http.end();
+
+        StaticJsonDocument<512> filter;
+        filter["cover"] = true;
+        filter["imageSrc"] = true;
+        filter["thumbnails"][0]["url"] = true;
+        filter["thumbnails"][0]["width"] = true;
+        filter["thumbnail"]["thumbnails"][0]["url"] = true;
+        filter["track"]["cover"] = true;
+        filter["track"]["thumbnail"]["thumbnails"][0]["url"] = true;
+
+        DynamicJsonDocument doc(4096);
+        DeserializationError err = deserializeJson(
+            doc,
+            resp,
+            DeserializationOption::Filter(filter),
+            DeserializationOption::NestingLimit(48)
+        );
+        if (err) {
+            Serial.printf("[ART] pear-desktop JSON parse failed: %s\n", err.c_str());
+            Serial.printf("[ART] pear response head: %.220s\n", resp.c_str());
+            continue;
+        }
+
+        // 1) direct keys
+        const char* cover = doc["cover"];
+        if (cover && cover[0]) outImageUrl = String(cover);
+        if (outImageUrl.length() == 0) {
+            const char* image = doc["imageSrc"];
+            if (image && image[0]) outImageUrl = String(image);
+        }
+
+        // 2) top-level thumbnails[]
+        if (outImageUrl.length() == 0) {
+            JsonArrayConst thumbs = doc["thumbnails"].as<JsonArrayConst>();
+            if (!thumbs.isNull()) {
+                const char* best = nullptr;
+                uint32_t bestW = 0;
+                for (JsonVariantConst t : thumbs) {
+                    const char* u = t["url"];
+                    if (!u || !u[0]) continue;
+                    uint32_t w = t["width"] | 0u;
+                    if (w >= 300 && (!best || bestW == 0 || w < bestW)) {
+                        best = u;
+                        bestW = w;
+                    } else if (!best) {
+                        best = u;
+                    }
+                }
+                if (best) outImageUrl = String(best);
+            }
+        }
+
+        // 3) nested thumbnail.thumbnails[]
+        if (outImageUrl.length() == 0) {
+            JsonArrayConst thumbs = doc["thumbnail"]["thumbnails"].as<JsonArrayConst>();
+            if (!thumbs.isNull()) {
+                for (JsonVariantConst t : thumbs) {
+                    const char* u = t["url"];
+                    if (u && u[0]) { outImageUrl = String(u); break; }
+                }
+            }
+        }
+
+        // 4) track.cover / track.thumbnail.thumbnails[]
+        if (outImageUrl.length() == 0) {
+            JsonObjectConst track = doc["track"].as<JsonObjectConst>();
+            if (!track.isNull()) {
+                const char* cover2 = track["cover"];
+                if (cover2 && cover2[0]) outImageUrl = String(cover2);
+                if (outImageUrl.length() == 0) {
+                    JsonArrayConst thumbs = track["thumbnail"]["thumbnails"].as<JsonArrayConst>();
+                    if (!thumbs.isNull()) {
+                        for (JsonVariantConst t : thumbs) {
+                            const char* u = t["url"];
+                            if (u && u[0]) { outImageUrl = String(u); break; }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (outImageUrl.length() > 0) {
+            // Google artwork: request a larger size to avoid tiny upscaled art.
+            if (outImageUrl.indexOf("googleusercontent.com") > 0 ||
+                outImageUrl.indexOf("ytimg.com") > 0 ||
+                outImageUrl.indexOf("ggpht.com") > 0) {
+                int eqPos = outImageUrl.lastIndexOf('=');
+                if (eqPos > 0 && (eqPos + 1) < (int)outImageUrl.length()) {
+                    char suffix = outImageUrl.charAt(eqPos + 1);
+                    if (suffix == 'w' || suffix == 's') {
+                        outImageUrl = outImageUrl.substring(0, eqPos) + "=w400-h400";
+                    }
+                }
+            }
+            return true;
+        }
+        Serial.printf("[ART] pear response had no image URL, trying next endpoint (path=%s)\n", song_paths[i]);
+    }
+    return false;
+}
+
 // Prepare and sanitize album art URL
 // Handles: HTML entity decoding, Sonos Radio URL extraction, size reduction, URL encoding
 static String prepareAlbumArtURL(const String& rawUrl) {
@@ -905,11 +1041,8 @@ static String prepareAlbumArtURL(const String& rawUrl) {
     // Spotify: Keep original resolution (640x640) since HTTP is lightweight
     // No size reduction needed - HTTP has no TLS overhead!
 
-    // Universal HTTP downgrade: try HTTP for ALL art HTTPS URLs
-    // Removes ALL TLS overhead (handshake, encryption, DMA memory)
-    // This is the KEY to SDIO stability - no TLS = no crashes!
-    // If a server refuses HTTP, the request returns non-200 and we show placeholder.
-    // Redirect following is disabled in the downloader to prevent unexpected HTTPS loops.
+    // Universal HTTP downgrade: try HTTP for all art HTTPS URLs.
+    // This keeps TLS overhead out of the art path for SDIO stability.
     if (fetchUrl.startsWith("https://")) {
         fetchUrl.replace("https://", "http://");
     }
@@ -1298,6 +1431,32 @@ void albumArtTask(void* param) {
                             vTaskDelay(pdMS_TO_TICKS(SDIO_TCP_CLOSE_MS - elapsed));
                         }
                     }
+
+                    // For Sonos proxy art URLs (/getaa), try pear-desktop's imageSrc first.
+                    // If this fails, keep using the original Sonos URL path.
+                    if (strstr(url, "/getaa?") != nullptr &&
+                        ytmd_ip.length() > 0 &&
+                        ytmd_token.length() > 0) {
+                        Serial.printf("[ART] Sonos getaa detected, trying pear API override (orig=%s)\n", url);
+                        String pearImageUrl;
+                        if (fetchPearDesktopImageSrc(pearImageUrl)) {
+                            String preparedPearUrl = prepareAlbumArtURL(pearImageUrl);
+                            if (preparedPearUrl.length() > 0) {
+                                strncpy(url, preparedPearUrl.c_str(), sizeof(url) - 1);
+                                url[sizeof(url) - 1] = '\0';
+                                Serial.printf("[ART] Using pear-desktop imageSrc: %s\n", url);
+                            } else {
+                                Serial.println("[ART] pear image URL empty after prepare(), keeping Sonos getaa");
+                            }
+                        } else {
+                            Serial.println("[ART] pear API override unavailable, keeping Sonos getaa");
+                        }
+                    }
+
+                    // URL may have changed above, so recompute transport flags.
+                    isFromSonosDevice = (strstr(url, ":1400/") != nullptr);
+                    isLocalNetwork = isFromSonosDevice || isPrivateIP(url);
+                    use_https = (strncmp(url, "https://", 8) == 0);
 
                     // Set up HTTP connection (inside mutex - all network activity serialized)
                     if (use_https) {

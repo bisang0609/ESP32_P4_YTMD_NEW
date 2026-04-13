@@ -20,6 +20,29 @@
 
 // Command debounce tracking
 static uint32_t lastCommandTime = 0;
+static const char* YTMD_VIRTUAL_RINCON = "YTMD_VIRTUAL";
+
+static bool ytmdVirtualAvailable() {
+    return (ytmd_ip.length() > 0 && ytmd_token.length() > 0);
+}
+
+static void ensureYtmdVirtualDevice(SonosDevice* devices, int* deviceCount, int* currentDeviceIndex) {
+    if (!devices || !deviceCount || !currentDeviceIndex) return;
+    if (*deviceCount > 0) return;
+    if (!ytmdVirtualAvailable()) return;
+
+    SonosDevice& d = devices[0];
+    d.ip = IPAddress(0, 0, 0, 0);
+    d.name = "youtube music desktop";
+    d.roomName = "youtube music desktop";
+    d.rinconID = YTMD_VIRTUAL_RINCON;
+    d.connected = true;
+    d.isGroupCoordinator = true;
+    d.groupMemberCount = 1;
+    d.groupCoordinatorUUID = d.rinconID;
+    *deviceCount = 1;
+    *currentDeviceIndex = 0;
+}
 
 // Encode string for XML/SOAP transport
 static void encodeXML(String& s) {
@@ -85,6 +108,12 @@ void SonosController::begin() {
         Serial.println("[SONOS] FATAL: Could not allocate devices array - discovery disabled");
     }
 
+    ensureYtmdVirtualDevice(devices, &deviceCount, &currentDeviceIndex);
+    if (deviceCount == 1 && currentDeviceIndex == 0 &&
+        devices[0].rinconID == YTMD_VIRTUAL_RINCON) {
+        Serial.printf("[YTMD] Virtual device initialized: %s\n", devices[0].roomName.c_str());
+    }
+
     deviceMutex = xSemaphoreCreateMutex();
     commandQueue = xQueueCreate(SONOS_CMD_QUEUE_SIZE, sizeof(CommandRequest_t));
     uiUpdateQueue = xQueueCreate(SONOS_UI_QUEUE_SIZE, sizeof(UIUpdate_t));
@@ -93,6 +122,11 @@ void SonosController::begin() {
 }
 
 void SonosController::startTasks() {
+    SonosDevice* current = getCurrentDevice();
+    if (current && current->rinconID == YTMD_VIRTUAL_RINCON) {
+        return;  // YTMD virtual mode does not use Sonos SOAP polling tasks
+    }
+
     if (networkTaskHandle == NULL) {
         if (!networkTaskStack)
             networkTaskStack = (StackType_t*)heap_caps_malloc(SONOS_NET_TASK_STACK, MALLOC_CAP_SPIRAM);
@@ -126,12 +160,19 @@ void SonosController::startTasks() {
 // Discovery - Implemented in sonos_discovery.cpp
 // ============================================================================
 
+int SonosController::getDeviceCount() {
+    ensureYtmdVirtualDevice(devices, &deviceCount, &currentDeviceIndex);
+    return deviceCount;
+}
+
 SonosDevice* SonosController::getDevice(int index) {
+    ensureYtmdVirtualDevice(devices, &deviceCount, &currentDeviceIndex);
     if (index >= 0 && index < deviceCount) return &devices[index];
     return nullptr;
 }
 
 SonosDevice* SonosController::getCurrentDevice() {
+    ensureYtmdVirtualDevice(devices, &deviceCount, &currentDeviceIndex);
     // Use local copy to prevent TOCTOU (time-of-check-time-of-use) race
     // Reading int is atomic on 32-bit systems, so no mutex needed for performance
     int index = currentDeviceIndex;
@@ -142,9 +183,14 @@ SonosDevice* SonosController::getCurrentDevice() {
 }
 
 void SonosController::selectDevice(int index) {
+    ensureYtmdVirtualDevice(devices, &deviceCount, &currentDeviceIndex);
     if (index >= 0 && index < deviceCount) {
         currentDeviceIndex = index;
         devices[index].connected = true;
+        if (devices[index].rinconID == YTMD_VIRTUAL_RINCON) {
+            Serial.printf("[YTMD] Selected virtual device: %s\n", devices[index].roomName.c_str());
+            return;
+        }
         Serial.printf("[SONOS] Selected: %s\n", devices[index].ip.toString().c_str());
 
         // Cache the selected device for fast boot next time

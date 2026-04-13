@@ -1575,6 +1575,175 @@ static void updateNextTrackUI(SonosDevice* d) {
     }
 }
 
+static String extractYtmdArtUrl(JsonVariantConst root) {
+    String artUrl = "";
+
+    const char* cover = root["cover"];
+    if (cover && cover[0]) artUrl = String(cover);
+
+    if (artUrl.length() == 0) {
+        const char* imageSrc = root["imageSrc"];
+        if (imageSrc && imageSrc[0]) artUrl = String(imageSrc);
+    }
+
+    if (artUrl.length() == 0) {
+        JsonArrayConst thumbs = root["thumbnails"].as<JsonArrayConst>();
+        if (!thumbs.isNull()) {
+            const char* best = nullptr;
+            uint32_t bestW = 0;
+            for (JsonVariantConst t : thumbs) {
+                const char* u = t["url"];
+                if (!u || !u[0]) continue;
+                uint32_t w = t["width"] | 0u;
+                if (w >= 300 && (!best || bestW == 0 || w < bestW)) {
+                    best = u;
+                    bestW = w;
+                } else if (!best) {
+                    best = u;
+                }
+            }
+            if (best) artUrl = String(best);
+        }
+    }
+
+    if (artUrl.length() == 0) {
+        JsonArrayConst thumbs = root["thumbnail"]["thumbnails"].as<JsonArrayConst>();
+        if (!thumbs.isNull()) {
+            for (JsonVariantConst t : thumbs) {
+                const char* u = t["url"];
+                if (u && u[0]) { artUrl = String(u); break; }
+            }
+        }
+    }
+
+    if (artUrl.length() == 0) {
+        JsonObjectConst track = root["track"].as<JsonObjectConst>();
+        if (!track.isNull()) {
+            const char* trackCover = track["cover"];
+            if (trackCover && trackCover[0]) artUrl = String(trackCover);
+            if (artUrl.length() == 0) {
+                JsonArrayConst thumbs = track["thumbnail"]["thumbnails"].as<JsonArrayConst>();
+                if (!thumbs.isNull()) {
+                    for (JsonVariantConst t : thumbs) {
+                        const char* u = t["url"];
+                        if (u && u[0]) { artUrl = String(u); break; }
+                    }
+                }
+            }
+        }
+    }
+
+    if (artUrl.length() > 0 &&
+        (artUrl.indexOf("googleusercontent.com") > 0 ||
+         artUrl.indexOf("ytimg.com") > 0 ||
+         artUrl.indexOf("ggpht.com") > 0)) {
+        int eqPos = artUrl.lastIndexOf('=');
+        if (eqPos > 0 && (eqPos + 1) < (int)artUrl.length()) {
+            char suffix = artUrl.charAt(eqPos + 1);
+            if (suffix == 'w' || suffix == 's') {
+                artUrl = artUrl.substring(0, eqPos) + "=w400-h400";
+            }
+        }
+    }
+
+    return artUrl;
+}
+
+static bool isYtmdVirtualDevice(const SonosDevice* d) {
+    return d && d->rinconID == "YTMD_VIRTUAL";
+}
+
+// Fallback path for builds where no Sonos device is active:
+// poll pear-desktop directly and feed album art into the existing art task.
+static void maybePollYtmdArtFallback() {
+    static unsigned long lastPollMs = 0;
+    static String lastRequestedYtmdArt = "";
+    static uint32_t noDeviceLogGate = 0;
+
+    const uint32_t now = millis();
+    if (now - lastPollMs < 3000) return;
+    lastPollMs = now;
+
+    if (ytmd_ip.length() == 0 || ytmd_token.length() == 0) return;
+    if (WiFi.status() != WL_CONNECTED) return;
+    if (art_download_in_progress) return;
+
+    if (!network_mutex || xSemaphoreTake(network_mutex, pdMS_TO_TICKS(120)) != pdTRUE) {
+        return;
+    }
+
+    const char* paths[] = {"/api/v1/song", "/api/v1/song-info"};
+    char auth[300];
+    snprintf(auth, sizeof(auth), "Bearer %s", ytmd_token.c_str());
+    bool gotArt = false;
+
+    for (size_t i = 0; i < (sizeof(paths) / sizeof(paths[0])); ++i) {
+        char url[192];
+        snprintf(url, sizeof(url), "http://%s:%d%s",
+                 ytmd_ip.c_str(),
+                 (ytmd_port > 0 ? ytmd_port : YTMD_DEFAULT_PORT),
+                 paths[i]);
+
+        HTTPClient http;
+        http.begin(url);
+        http.addHeader("Authorization", auth);
+        http.setTimeout(2500);
+        int code = http.GET();
+        Serial.printf("[YTMD/FB] GET %s -> HTTP %d\n", url, code);
+
+        if (code == 404) {
+            http.end();
+            continue;
+        }
+        if (code != 200) {
+            http.end();
+            break;
+        }
+
+        String resp = http.getString();
+        http.end();
+
+        StaticJsonDocument<512> filter;
+        filter["cover"] = true;
+        filter["imageSrc"] = true;
+        filter["thumbnails"][0]["url"] = true;
+        filter["thumbnails"][0]["width"] = true;
+        filter["thumbnail"]["thumbnails"][0]["url"] = true;
+        filter["track"]["cover"] = true;
+        filter["track"]["thumbnail"]["thumbnails"][0]["url"] = true;
+
+        DynamicJsonDocument doc(4096);
+        DeserializationError err = deserializeJson(
+            doc,
+            resp,
+            DeserializationOption::Filter(filter),
+            DeserializationOption::NestingLimit(48)
+        );
+        if (err) {
+            Serial.printf("[YTMD/FB] JSON parse error: %s\n", err.c_str());
+            continue;
+        }
+
+        String art = extractYtmdArtUrl(doc.as<JsonVariantConst>());
+        if (art.length() > 0) {
+            gotArt = true;
+            if (art != lastRequestedYtmdArt) {
+                Serial.printf("[YTMD/FB] Requesting art: %s\n", art.c_str());
+                requestAlbumArt(art);
+                lastRequestedYtmdArt = art;
+            }
+            break;
+        }
+    }
+
+    if (!gotArt && (now - noDeviceLogGate > 10000)) {
+        Serial.println("[YTMD/FB] No art URL available from pear endpoints yet");
+        noDeviceLogGate = now;
+    }
+
+    xSemaphoreGive(network_mutex);
+}
+
 // Selects the correct art URL and calls requestAlbumArt() when needed.
 // Also handles URI change detection and "not playing" transitions.
 static void updateAlbumArtRequest(SonosDevice* d) {
@@ -1767,7 +1936,11 @@ static void updateAlbumArtRequest(SonosDevice* d) {
 // ============================================================================
 void updateUI() {
     SonosDevice* d = sonos.getCurrentDevice();
-    if (!d) return;
+    if (!d || isYtmdVirtualDevice(d)) {
+        maybePollYtmdArtFallback();
+        displayCompletedArt();
+        return;
+    }
 
     if (!updateConnectionState(d)) return;
 
@@ -1828,7 +2001,7 @@ void updateUI() {
     // Device name in header
     static String ui_device_name = "";
     if (d->roomName != ui_device_name) {
-        String np = "Now Playing - " + d->roomName;
+        String np = "YouTube Music Desktop";
         lv_label_set_text(lbl_device_name, np.c_str());
         ui_device_name = d->roomName;
     }
@@ -1944,7 +2117,11 @@ void processUpdates() {
         if (upd.type == UPDATE_QUEUE) queue_updated = true;
     }
     if (need && (millis() - lastUpdate > 200)) { updateUI(); lastUpdate = millis(); }
-    else displayCompletedArt();  // Run even without Sonos events (e.g. art ready while polling suppressed)
+    else {
+        SonosDevice* d = sonos.getCurrentDevice();
+        if (!d || isYtmdVirtualDevice(d)) maybePollYtmdArtFallback();
+        displayCompletedArt();  // Run even without Sonos events (e.g. art ready while polling suppressed)
+    }
     // Auto-refresh queue list if the queue screen is visible when new data arrives
     if (queue_updated && lv_screen_active() == scr_queue) refreshQueueList();
 }

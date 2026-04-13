@@ -106,7 +106,7 @@ void createMainScreen() {
     lv_obj_set_style_pad_all(panel_right, 0, 0);
     lv_obj_clear_flag(panel_right, LV_OBJ_FLAG_SCROLLABLE);
 
-    // ===== TOP ROW: Back | Now Playing - Device | WiFi Queue Settings =====
+    // ===== TOP ROW: Back | Device Name | WiFi Queue Settings =====
     // Setup smooth scale transition for all buttons (110% on press)
     static lv_style_transition_dsc_t trans_btn;
     static lv_style_prop_t trans_props[] = {LV_STYLE_TRANSFORM_SCALE_X, LV_STYLE_TRANSFORM_SCALE_Y, LV_STYLE_PROP_INV};
@@ -129,9 +129,9 @@ void createMainScreen() {
     lv_obj_set_style_text_color(ico_back, COL_TEXT, 0);
     lv_obj_center(ico_back);
 
-    // "Now Playing - Device" label - positioned after back button
+    // Device name label - positioned after back button
     lbl_device_name = lv_label_create(panel_right);
-    lv_label_set_text(lbl_device_name, "Now Playing");
+    lv_label_set_text(lbl_device_name, "YouTube Music Desktop");
     lv_obj_set_style_text_color(lbl_device_name, COL_TEXT2, 0);
     lv_obj_set_style_text_font(lbl_device_name, &lv_font_montserrat_14, 0);
     lv_obj_set_pos(lbl_device_name, 55, 25);

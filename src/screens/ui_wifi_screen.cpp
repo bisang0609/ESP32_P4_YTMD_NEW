@@ -27,7 +27,7 @@ void createWiFiScreen() {
     scr_wifi = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_wifi, lv_color_hex(0x121212), 0);
 
-    lv_obj_t* content = createSettingsSidebar(scr_wifi, 3);
+    lv_obj_t* content = createSettingsSidebar(scr_wifi, 2);
     lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
 
     // ── Title row ──────────────────────────────────────────────────────────────

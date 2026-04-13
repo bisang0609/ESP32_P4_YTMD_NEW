@@ -162,7 +162,7 @@ public:
     void cacheDeviceIP(String ip);
     bool tryLoadCachedDevice();        // Try to load cached device from NVS (fast boot)
     void cacheSelectedDevice();        // Save selected device to NVS
-    int getDeviceCount() { return deviceCount; }
+    int getDeviceCount();
     SonosDevice* getDevice(int index);
     SonosDevice* getCurrentDevice();
     void selectDevice(int index);

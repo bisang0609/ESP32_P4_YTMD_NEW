@@ -1,5 +1,5 @@
 /**
- * ESP32-P4 Sonos Controller
+ * ESP32-P4 YTMD Controller
  * 480x800 MIPI DSI Display with Touch
  * Modern UI matching reference design
  */
@@ -13,6 +13,10 @@
 // Sonos logo
 LV_IMG_DECLARE(Sonos_idnu60bqes_1);
 
+static bool ytmdModeConfigured() {
+    return (ytmd_ip.length() > 0 && ytmd_token.length() > 0);
+}
+
 static bool sonos_started = false;  // true once Sonos tasks are running
 static TaskHandle_t mainAppTaskHandle = nullptr;
 static void mainAppTask(void* param);  // forward declaration — defined after loop()
@@ -20,7 +24,7 @@ static void mainAppTask(void* param);  // forward declaration — defined after 
 void setup() {
     Serial.begin(SERIAL_BAUD_RATE);
     delay(500);
-    Serial.println("\n=== SONOS CONTROLLER ===");
+    Serial.println("\n=== YTMD CONTROLLER ===");
     Serial.printf("Free heap: %d, PSRAM: %d\n", esp_get_free_heap_size(), heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
     // Detect flash chip - auto-suspend only works with specific chips
@@ -350,7 +354,10 @@ void setup() {
     updateBootProgress(95);
 
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("[SONOS] WiFi not connected at boot - deferring discovery");
+        Serial.println("[YTMD] WiFi not connected at boot - deferring startup checks");
+    } else if (ytmdModeConfigured()) {
+        sonos_started = true;
+        Serial.println("[YTMD] Mode active - skipping Sonos cache discovery");
     } else {
         // Try to load cached device first for fast boot (~2s vs ~15s)
         bool loadedFromCache = sonos.tryLoadCachedDevice();
@@ -361,7 +368,7 @@ void setup() {
         } else {
             // Cache miss or unreachable - skip SSDP at boot (device may not be ready yet)
             // User can trigger discovery manually via Settings > Scan
-            Serial.println("[SONOS] Cached device unreachable at boot - use Settings to scan");
+            Serial.println("[YTMD] Sonos cache path skipped/unavailable at boot");
         }
     }
 
@@ -393,20 +400,25 @@ void checkWiFiReconnect() {
         Serial.println("[WIFI] Connection lost, attempting reconnect...");
         WiFi.reconnect();
     } else if (!sonos_started) {
+        if (ytmdModeConfigured()) {
+            sonos_started = true;
+            Serial.println("[YTMD] WiFi connected - staying in YTMD mode");
+            return;
+        }
         // WiFi connected but Sonos not yet started (WiFi was down at boot)
         // (Re)start NTP sync now that we have connectivity
         configTime(0, 0, "pool.ntp.org", "time.nist.gov");
         setenv("TZ", CLOCK_ZONES[clock_tz_idx].posix, 1);
         tzset();
-        Serial.println("[SONOS] WiFi now connected - attempting deferred discovery from cache");
+        Serial.println("[YTMD] WiFi now connected - evaluating startup mode");
         bool loadedFromCache = sonos.tryLoadCachedDevice();
         if (loadedFromCache) {
             sonos.selectDevice(0);
             sonos.startTasks();
             sonos_started = true;
-            Serial.println("[SONOS] Deferred discovery succeeded from cache");
+            Serial.println("[YTMD] Deferred Sonos cache discovery succeeded");
         } else {
-            Serial.println("[SONOS] No cached device - use Devices screen to discover");
+            Serial.println("[YTMD] No cached Sonos device - use Devices screen to discover");
         }
     }
 }
