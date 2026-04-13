@@ -224,7 +224,7 @@ void createYTMDScreen() {
     lv_obj_center(lbl_clear);
 
     // ── Test Connection button ─────────────────────────────────────────────────
-    // GET /api/v1/state with Bearer token → verifies server is reachable + token valid
+    // GET /api/v1/volume with Bearer token → verifies server is reachable + token valid
     lv_obj_t* btn_test = lv_button_create(content);
     lv_obj_set_size(btn_test, lv_pct(100), 44);
     lv_obj_set_style_bg_color(btn_test, lv_color_hex(0x1E3A2A), 0);
@@ -339,7 +339,7 @@ void createYTMDScreen() {
     }, LV_EVENT_CLICKED, NULL);
 
     // ── Test Connection button event ───────────────────────────────────────────
-    // GET /api/v1/state  — lightweight ping that also validates the Bearer token
+    // GET /api/v1/volume  — lightweight ping that also validates the Bearer token
     lv_obj_add_event_cb(btn_test, [](lv_event_t* e) {
         if (ytmd_ip.length() == 0) {
             lv_obj_set_style_text_color(s_dot, lv_color_hex(0xFF5555), 0);
@@ -360,7 +360,7 @@ void createYTMDScreen() {
         lv_refr_now(NULL);
 
         char url[160];
-        snprintf(url, sizeof(url), "http://%s:%d/api/v1/state",
+        snprintf(url, sizeof(url), "http://%s:%d/api/v1/volume",
                  ytmd_ip.c_str(), ytmd_port);
 
         char auth_header[300];
