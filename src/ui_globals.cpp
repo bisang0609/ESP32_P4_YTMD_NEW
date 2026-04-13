@@ -48,6 +48,7 @@ lv_obj_t *scr_display = nullptr;
 lv_obj_t *scr_ota = nullptr;
 lv_obj_t *scr_groups = nullptr;
 lv_obj_t *scr_general = nullptr;
+lv_obj_t *scr_ytmd = nullptr;
 
 // ============================================================================
 // Main Screen UI Elements
@@ -254,6 +255,15 @@ lv_obj_t* scr_clock_settings = nullptr;
 lv_obj_t* clock_bg_img       = nullptr;
 lv_obj_t* clock_time_lbl     = nullptr;
 lv_obj_t* clock_date_lbl     = nullptr;
+
+// ============================================================================
+// YTMD State
+// ============================================================================
+String ytmd_ip        = "";
+int    ytmd_port      = YTMD_DEFAULT_PORT;
+String ytmd_auth_code = "";
+String ytmd_token     = "";    // pear-desktop Bearer access token (saved to NVS)
+lv_obj_t* lbl_ytmd_status = nullptr;
 
 // ============================================================================
 // OTA Update State

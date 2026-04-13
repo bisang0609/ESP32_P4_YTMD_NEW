@@ -67,6 +67,14 @@ extern bool screen_dimmed;
 extern lv_obj_t *scr_main, *scr_devices, *scr_queue, *scr_settings;
 extern lv_obj_t *scr_wifi, *scr_sources, *scr_browse, *scr_display, *scr_ota, *scr_groups, *scr_general;
 extern lv_obj_t *scr_clock, *scr_clock_settings;
+extern lv_obj_t *scr_ytmd;
+
+// YTMD state
+extern String ytmd_ip;
+extern int    ytmd_port;
+extern String ytmd_auth_code;
+extern String ytmd_token;         // pear-desktop Bearer access token
+extern lv_obj_t *lbl_ytmd_status;
 
 // Main screen UI elements
 extern lv_obj_t *img_album, *lbl_title, *lbl_artist, *lbl_album, *lbl_time, *lbl_time_remaining;
@@ -180,6 +188,7 @@ void createGroupsScreen();
 void createGeneralScreen();
 void createClockScreen();
 void createClockSettingsScreen();
+void createYTMDScreen();
 
 // ============================================================================
 // Function Declarations - UI Refresh

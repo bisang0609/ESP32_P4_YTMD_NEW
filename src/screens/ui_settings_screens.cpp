@@ -178,12 +178,11 @@ void createQueueScreen() {
 // Settings Screen (just redirects to Speakers)
 // ============================================================================
 void createSettingsScreen() {
-    // Settings screen just redirects to Speakers screen (which has the sidebar)
-    // scr_settings will point to scr_devices so clicking Settings button loads Speakers
-    if (!scr_devices) {
-        createDevicesScreen();
+    // Settings screen just redirects to General screen (which has the sidebar)
+    if (!scr_general) {
+        createGeneralScreen();
     }
-    scr_settings = scr_devices;  // Point to the same screen
+    scr_settings = scr_general;  // Point to the same screen
 }
 
 // ============================================================================
@@ -194,7 +193,7 @@ void createSourcesScreen() {
     lv_obj_set_style_bg_color(scr_sources, lv_color_hex(0x121212), 0);
 
     // Create sidebar and get content area (Sources is index 3)
-    lv_obj_t* content = createSettingsSidebar(scr_sources, 3);
+    lv_obj_t* content = createSettingsSidebar(scr_sources, 1);
     lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
 
     // Title
@@ -292,7 +291,7 @@ void createBrowseScreen() {
     lv_obj_set_style_bg_color(scr_browse, lv_color_hex(0x121212), 0);
 
     // Create sidebar and get content area (Sources is index 3)
-    lv_obj_t* content = createSettingsSidebar(scr_browse, 3);
+    lv_obj_t* content = createSettingsSidebar(scr_browse, 1);
     lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
 
     // Title

@@ -178,6 +178,15 @@
 #define NVS_KEY_LYRICS          "lyrics"
 #define NVS_KEY_OTA_PENDING     "ota_pending"    // Auto-reboot OTA flag
 #define NVS_KEY_OTA_URL         "ota_url"        // Saved firmware URL for auto-reboot OTA
+#define NVS_KEY_YTMD_IP         "ytmd_ip"        // YTMDesktop target IP address
+#define NVS_KEY_YTMD_PORT       "ytmd_port"      // YTMDesktop companion server port
+#define NVS_KEY_YTMD_TOKEN      "ytmd_token"     // pear-desktop Bearer access token
+
+// =============================================================================
+// YTMD / PEAR-DESKTOP
+// =============================================================================
+#define YTMD_DEFAULT_PORT       26538   // pear-desktop API server default port
+#define YTMD_APP_ID             "esp32ytmd"
 
 // =============================================================================
 // UI COLORS (hex values)

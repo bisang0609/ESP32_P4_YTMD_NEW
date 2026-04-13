@@ -57,8 +57,8 @@ void createClockSettingsScreen() {
     scr_clock_settings = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_clock_settings, lv_color_hex(0x121212), 0);
 
-    // Sidebar — Clock is index 6
-    lv_obj_t* content = createSettingsSidebar(scr_clock_settings, 6);
+    // Sidebar — Clock is index 4
+    lv_obj_t* content = createSettingsSidebar(scr_clock_settings, 4);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_set_scrollbar_mode(content, LV_SCROLLBAR_MODE_AUTO);

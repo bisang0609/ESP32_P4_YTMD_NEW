@@ -99,6 +99,15 @@ void setup() {
                   clock_weather_enabled ? "on" : "off",
                   CLOCK_CITIES[clock_weather_city_idx].label);
 
+    // Load YTMD settings from NVS
+    ytmd_ip    = wifiPrefs.getString(NVS_KEY_YTMD_IP,    "");
+    ytmd_port  = wifiPrefs.getInt   (NVS_KEY_YTMD_PORT,  YTMD_DEFAULT_PORT);
+    ytmd_token = wifiPrefs.getString(NVS_KEY_YTMD_TOKEN, "");
+    if (ytmd_port <= 0) ytmd_port = YTMD_DEFAULT_PORT;
+    Serial.printf("[YTMD] Loaded IP=%s Port=%d Token=%s\n",
+                  ytmd_ip.c_str(), ytmd_port,
+                  ytmd_token.length() > 0 ? "<saved>" : "<none>");
+
     // Brightness will be set after display_init() is called
     Serial.println("[DISPLAY] ESP32-P4 uses ST7701 backlight control (no PWM needed)");
 
@@ -330,6 +339,7 @@ void setup() {
     createGeneralScreen();
     createClockScreen();
     createClockSettingsScreen();
+    createYTMDScreen();
     updateBootProgress(85);
 
     art_mutex = xSemaphoreCreateMutex();
