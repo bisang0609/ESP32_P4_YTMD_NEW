@@ -65,6 +65,111 @@ static bool isYtmdMode() {
     return !d || (d->rinconID == "YTMD_VIRTUAL");
 }
 
+// Shared interpolation state — written by poll, read by updateYtmdProgressInterp()
+static float         s_ytmd_elapsed_sec  = 0.0f;
+static int           s_ytmd_dur_sec      = 0;
+static bool          s_ytmd_is_playing   = false;
+static unsigned long s_ytmd_pos_ts       = 0;   // millis() when elapsed was last polled
+
+#ifndef YTMD_FB_VERBOSE_LOGS
+#define YTMD_FB_VERBOSE_LOGS 0
+#endif
+
+#if YTMD_FB_VERBOSE_LOGS
+#define YTMD_FB_LOG(...) Serial.printf(__VA_ARGS__)
+#define YTMD_FB_LOG_LN(msg) Serial.println(msg)
+#else
+#define YTMD_FB_LOG(...) do {} while (0)
+#define YTMD_FB_LOG_LN(msg) do {} while (0)
+#endif
+
+// Parse "M:SS" or "H:MM:SS" into seconds.
+static bool parseTimeStringToSeconds(const char* text, float* outSeconds) {
+    if (!text || !outSeconds) return false;
+    String s(text);
+    s.trim();
+    if (s.length() == 0) return false;
+
+    bool neg = false;
+    if (s[0] == '-') {
+        neg = true;
+        s.remove(0, 1);
+        s.trim();
+    }
+    if (s.length() == 0 || s.indexOf(':') < 0) return false;
+
+    int p2 = s.lastIndexOf(':');
+    int p1 = s.lastIndexOf(':', p2 - 1);
+    long h = 0, m = 0, sec = 0;
+
+    if (p1 >= 0) {
+        h = s.substring(0, p1).toInt();
+        m = s.substring(p1 + 1, p2).toInt();
+        sec = s.substring(p2 + 1).toInt();
+    } else {
+        m = s.substring(0, p2).toInt();
+        sec = s.substring(p2 + 1).toInt();
+    }
+
+    if (m < 0 || sec < 0) return false;
+    float total = (float)(h * 3600 + m * 60 + sec);
+    *outSeconds = neg ? -total : total;
+    return true;
+}
+
+// Parse seconds from JSON value that may be numeric or a time string.
+static bool parseJsonSeconds(JsonVariantConst v, float* outSeconds) {
+    if (!outSeconds || v.isNull()) return false;
+
+    if (v.is<const char*>()) {
+        const char* s = v.as<const char*>();
+        if (!s || !s[0]) return false;
+        float sec = 0.0f;
+        if (parseTimeStringToSeconds(s, &sec)) {
+            *outSeconds = sec;
+            return true;
+        }
+        *outSeconds = (float)atof(s);
+        return true;
+    }
+
+    if (v.is<float>() || v.is<double>() ||
+        v.is<int>() || v.is<long>() ||
+        v.is<unsigned int>() || v.is<unsigned long>()) {
+        *outSeconds = v.as<float>();
+        return true;
+    }
+    return false;
+}
+
+// Parse bool from JSON value that may be bool/int/string.
+static bool parseJsonBoolFlexible(JsonVariantConst v, bool defaultVal) {
+    if (v.isNull()) return defaultVal;
+    if (v.is<bool>()) return v.as<bool>();
+    if (v.is<int>() || v.is<long>() || v.is<unsigned int>() || v.is<unsigned long>()) {
+        return v.as<long>() != 0;
+    }
+    if (v.is<const char*>()) {
+        String s(v.as<const char*>());
+        s.trim();
+        s.toLowerCase();
+        if (s == "true" || s == "1" || s == "yes" || s == "on") return true;
+        if (s == "false" || s == "0" || s == "no" || s == "off") return false;
+    }
+    return defaultVal;
+}
+
+static void formatTimeLabel(int totalSec, char* out, size_t outSize, bool withMinus) {
+    if (!out || outSize == 0) return;
+    if (totalSec < 0) totalSec = 0;
+    int h = totalSec / 3600;
+    int m = (totalSec % 3600) / 60;
+    int s = totalSec % 60;
+    const char* sign = withMinus ? "-" : "";
+    if (h > 0) snprintf(out, outSize, "%s%d:%02d:%02d", sign, h, m, s);
+    else snprintf(out, outSize, "%s%d:%02d", sign, m, s);
+}
+
 // POST to pear-desktop API with bearer token authentication.
 // Called from UI task for playback commands — short timeout to avoid touch freeze.
 // Returns HTTP response code (200 = success, negative = connection error).
@@ -154,21 +259,31 @@ void ev_repeat(lv_event_t* e) {
 
 void ev_progress(lv_event_t* e) {
     lv_event_code_t code = lv_event_get_code(e);
-    if (code == LV_EVENT_PRESSING) {
+    if (code == LV_EVENT_PRESSED || code == LV_EVENT_PRESSING) {
         dragging_prog = true;
-    } else if (code == LV_EVENT_RELEASED) {
+    } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
         if (isYtmdMode()) {
             if (ytmd_duration_seconds > 0) {
                 int seekSec = (lv_slider_get_value(slider_progress) * ytmd_duration_seconds) / 100;
+                Serial.printf("[YTMD/SEEK] slider=%d dur=%d seek=%d\n",
+                              lv_slider_get_value(slider_progress),
+                              ytmd_duration_seconds,
+                              seekSec);
                 char body[32];
                 snprintf(body, sizeof(body), "{\"seconds\":%d}", seekSec);
                 ytmdApiPost("/api/v1/seek-to", body);
+                // Optimistic local update: avoid waiting up to next poll interval
+                // before slider/time labels reflect the new seek target.
+                s_ytmd_elapsed_sec = (float)seekSec;
+                s_ytmd_pos_ts = millis();
             }
         } else {
             SonosDevice* d = sonos.getCurrentDevice();
             if (d && d->durationSeconds > 0)
                 sonos.seek((lv_slider_get_value(slider_progress) * d->durationSeconds) / 100);
         }
+        dragging_prog = false;
+    } else if (code == LV_EVENT_CANCEL) {
         dragging_prog = false;
     }
 }
@@ -1728,9 +1843,20 @@ static String extractYtmdArtUrl(JsonVariantConst root) {
         if (eqPos > 0 && (eqPos + 1) < (int)artUrl.length()) {
             char suffix = artUrl.charAt(eqPos + 1);
             if (suffix == 'w' || suffix == 's') {
-                artUrl = artUrl.substring(0, eqPos) + "=w200-h200";
+                // Balance stability and visual quality for Google-hosted artwork.
+                artUrl = artUrl.substring(0, eqPos) + "=w300-h300";
             }
         }
+    }
+
+    // ytimg path-style thumbnails (e.g. /hq720.jpg) don't use '=w..-h..' params.
+    // Normalize those to mqdefault (~320x180) to keep payload moderate and stable.
+    if (artUrl.indexOf("i.ytimg.com/vi/") > 0) {
+        artUrl.replace("/maxresdefault.jpg", "/mqdefault.jpg");
+        artUrl.replace("/sddefault.jpg", "/mqdefault.jpg");
+        artUrl.replace("/hq720.jpg", "/mqdefault.jpg");
+        artUrl.replace("/hq720_live.jpg", "/mqdefault.jpg");
+        artUrl.replace("/hqdefault.jpg", "/mqdefault.jpg");
     }
 
     return artUrl;
@@ -1740,33 +1866,63 @@ static bool isYtmdVirtualDevice(const SonosDevice* d) {
     return d && d->rinconID == "YTMD_VIRTUAL";
 }
 
-// Shared interpolation state — written by poll, read by updateYtmdProgressInterp()
-static float         s_ytmd_elapsed_sec  = 0.0f;
-static int           s_ytmd_dur_sec      = 0;
-static bool          s_ytmd_is_playing   = false;
-static unsigned long s_ytmd_pos_ts       = 0;   // millis() when elapsed was last polled
-
 // Fallback path for builds where no Sonos device is active:
 // poll pear-desktop directly and feed album art into the existing art task.
 // Uses short timeout + exponential backoff on failure to avoid blocking the UI task.
 static void maybePollYtmdArtFallback() {
     static unsigned long lastPollMs = 0;
     static String lastRequestedYtmdArt = "";
+    static String lastProgressTrackKey = "";
     static uint32_t noDeviceLogGate = 0;
     static int consecutiveFailures = 0;
+    static uint32_t skipLogGate = 0;
+    static uint32_t rawJsonLogGate = 0;
+    static uint32_t metaLogGate = 0;
+    static uint32_t parseLogGate = 0;
+    static uint32_t staleElapsedLogGate = 0;
     // Backoff intervals (ms): 3s, 10s, 30s, 60s — caps at 60s after 4+ failures
     static const uint32_t kBackoffMs[] = {3000, 10000, 30000, 60000};
 
     const uint32_t now = millis();
     int backoffIdx = consecutiveFailures < 4 ? consecutiveFailures : 3;
-    if (now - lastPollMs < kBackoffMs[backoffIdx]) return;
+    if (now - lastPollMs < kBackoffMs[backoffIdx]) {
+        if (now - skipLogGate > 8000) {
+            YTMD_FB_LOG("[YTMD/FB] skip: backoff (failures=%d wait=%lu)\n",
+                        consecutiveFailures, (unsigned long)kBackoffMs[backoffIdx]);
+            skipLogGate = now;
+        }
+        return;
+    }
     lastPollMs = now;
 
-    if (ytmd_ip.length() == 0 || ytmd_token.length() == 0) return;
-    if (WiFi.status() != WL_CONNECTED) return;
-    if (art_download_in_progress) return;
+    if (ytmd_ip.length() == 0 || ytmd_token.length() == 0) {
+        if (now - skipLogGate > 8000) {
+            YTMD_FB_LOG("[YTMD/FB] skip: config missing (ip=%d token=%d)\n",
+                        (int)(ytmd_ip.length() > 0), (int)(ytmd_token.length() > 0));
+            skipLogGate = now;
+        }
+        return;
+    }
+    if (WiFi.status() != WL_CONNECTED) {
+        if (now - skipLogGate > 8000) {
+            YTMD_FB_LOG("[YTMD/FB] skip: wifi disconnected (status=%d)\n", (int)WiFi.status());
+            skipLogGate = now;
+        }
+        return;
+    }
+    if (art_download_in_progress) {
+        if (now - skipLogGate > 8000) {
+            YTMD_FB_LOG_LN("[YTMD/FB] skip: art download in progress");
+            skipLogGate = now;
+        }
+        return;
+    }
 
     if (!network_mutex || xSemaphoreTake(network_mutex, pdMS_TO_TICKS(120)) != pdTRUE) {
+        if (now - skipLogGate > 8000) {
+            YTMD_FB_LOG_LN("[YTMD/FB] skip: network mutex busy");
+            skipLogGate = now;
+        }
         return;
     }
 
@@ -1789,7 +1945,7 @@ static void maybePollYtmdArtFallback() {
         // Long timeout (2500ms) on the UI task blocks LVGL and freezes touch.
         http.setTimeout(600);
         int code = http.GET();
-        Serial.printf("[YTMD/FB] GET %s -> HTTP %d\n", url, code);
+        YTMD_FB_LOG("[YTMD/FB] GET %s -> HTTP %d\n", url, code);
 
         if (code == 404) {
             http.end();
@@ -1805,11 +1961,10 @@ static void maybePollYtmdArtFallback() {
         String resp = http.getString();
         http.end();
 
-        // Debug: print raw JSON once so we can verify field names
-        static bool jsonLogged = false;
-        if (!jsonLogged) {
-            Serial.printf("[YTMD/FB] RAW JSON (first 600): %.600s\n", resp.c_str());
-            jsonLogged = true;
+        // Debug: periodic raw JSON to verify current payload shape.
+        if (now - rawJsonLogGate > 10000) {
+            YTMD_FB_LOG("[YTMD/FB] RAW JSON (first 600): %.600s\n", resp.c_str());
+            rawJsonLogGate = now;
         }
 
         // Filter: must include every field we intend to read.
@@ -1830,23 +1985,30 @@ static void maybePollYtmdArtFallback() {
         filter["track"]["author"] = true;
         filter["track"]["artist"] = true;   // alt field name
         filter["track"]["duration"] = true; // may be seconds or ms — handled below
+        filter["track"]["durationSeconds"] = true;
         // pear-desktop player object
         filter["player"]["isPaused"] = true;
+        filter["player"]["isPlaying"] = true;
         filter["player"]["seekbarCurrentPosition"] = true;
         filter["player"]["seekbarCurrentPositionHuman"] = true; // "M:SS" string
         filter["player"]["statePercent"] = true;   // 0.0-1.0 fraction fallback
+        filter["player"]["duration"] = true;
+        filter["player"]["elapsedSeconds"] = true;
         filter["player"]["repeatType"] = true;
         filter["player"]["queue"]["shuffleEnabled"] = true;
         filter["player"]["queue"]["isShuffleEnabled"] = true;
         // Flat / legacy fallbacks
         filter["title"] = true;
+        filter["videoId"] = true;
         filter["author"] = true;
         filter["artist"] = true;
         filter["isPaused"] = true;
+        filter["isPlaying"] = true;
         filter["elapsedSeconds"] = true;
         filter["songDuration"] = true;
         filter["repeatMode"] = true;
         filter["shuffleMode"] = true;
+        filter["track"]["videoId"] = true;
 
         DynamicJsonDocument doc(4096);
         DeserializationError err = deserializeJson(
@@ -1866,23 +2028,22 @@ static void maybePollYtmdArtFallback() {
         JsonVariantConst trackObj   = root["track"];   // may be null
         JsonVariantConst playerObj  = root["player"];  // may be null
 
-        // Log parsed field availability once to help diagnose field-name mismatches
-        static bool metaLogged = false;
-        if (!metaLogged) {
-            Serial.printf("[YTMD/FB] track.isNull=%d player.isNull=%d\n",
-                          (int)trackObj.isNull(), (int)playerObj.isNull());
+        // Periodic field-availability log for payload-shape diagnostics.
+        if (now - metaLogGate > 10000) {
+            YTMD_FB_LOG("[YTMD/FB] track.isNull=%d player.isNull=%d\n",
+                        (int)trackObj.isNull(), (int)playerObj.isNull());
             if (!trackObj.isNull()) {
-                Serial.printf("[YTMD/FB] track.title=%s track.author=%s track.duration=%.0f\n",
-                    trackObj["title"] | "?", trackObj["author"] | "?",
-                    trackObj["duration"] | 0.0f);
+                YTMD_FB_LOG("[YTMD/FB] track.title=%s track.author=%s track.duration=%.0f\n",
+                            trackObj["title"] | "?", trackObj["author"] | "?",
+                            trackObj["duration"] | 0.0f);
             }
             if (!playerObj.isNull()) {
-                Serial.printf("[YTMD/FB] player.isPaused=%d player.seek=%.1f player.repeat=%s\n",
-                    (int)(playerObj["isPaused"] | -1),
-                    playerObj["seekbarCurrentPosition"] | 0.0f,
-                    playerObj["repeatType"] | "?");
+                YTMD_FB_LOG("[YTMD/FB] player.isPaused=%d player.seek=%.1f player.repeat=%s\n",
+                            (int)(playerObj["isPaused"] | -1),
+                            playerObj["seekbarCurrentPosition"] | 0.0f,
+                            playerObj["repeatType"] | "?");
             }
-            metaLogged = true;
+            metaLogGate = now;
         }
 
         // --- Update track metadata on UI ---
@@ -1914,44 +2075,131 @@ static void maybePollYtmdArtFallback() {
             }
         }
 
-        // Duration: track.duration can be in seconds or ms depending on pear-desktop version.
-        // Heuristic: values > 3600 are almost certainly milliseconds (> 1 hour in seconds is rare).
-        float rawDur = (!trackObj.isNull()) ? (trackObj["duration"] | 0.0f) : 0.0f;
-        float songDurationSec = (rawDur > 3600.0f) ? (rawDur / 1000.0f)
-                              : (rawDur > 0.0f)    ? rawDur
-                              : (root["songDuration"] | 0.0f);
-
-        // Elapsed: player.seekbarCurrentPosition (seconds in pear-desktop).
-        // If the value exceeds songDuration * 10, assume it's in milliseconds.
-        float rawElapsed = 0.0f;
-        if (!playerObj.isNull()) {
-            rawElapsed = playerObj["seekbarCurrentPosition"] | 0.0f;
-            if (rawElapsed == 0.0f) {
-                // Fallback: statePercent * duration
-                float pct = playerObj["statePercent"] | 0.0f;
-                if (pct > 0.0f && songDurationSec > 0.0f) rawElapsed = pct * songDurationSec;
+        // Play/Pause: support both isPaused and isPlaying.
+        bool isPlaying = s_ytmd_is_playing;
+        // Prefer flat root keys first (known-good API shape), nested as fallback.
+        if (!root["isPlaying"].isNull()) {
+            isPlaying = parseJsonBoolFlexible(root["isPlaying"], isPlaying);
+        } else if (!root["isPaused"].isNull()) {
+            bool isPaused = parseJsonBoolFlexible(root["isPaused"], !isPlaying);
+            isPlaying = !isPaused;
+        } else if (!playerObj.isNull()) {
+            if (!playerObj["isPlaying"].isNull()) {
+                isPlaying = parseJsonBoolFlexible(playerObj["isPlaying"], isPlaying);
+            } else if (!playerObj["isPaused"].isNull()) {
+                bool isPaused = parseJsonBoolFlexible(playerObj["isPaused"], !isPlaying);
+                isPlaying = !isPaused;
             }
         }
-        if (rawElapsed == 0.0f) rawElapsed = root["elapsedSeconds"] | 0.0f;
-        // Unit sanity: if elapsed >> duration, it's probably in ms
-        float elapsedSec = (songDurationSec > 0.0f && rawElapsed > songDurationSec * 10.0f)
-                         ? rawElapsed / 1000.0f
-                         : rawElapsed;
+
+        // Track key for progress anti-rollback: prefer stable videoId, fallback title|artist.
+        String trackKey = "";
+        const char* videoId = root["videoId"] | (const char*)nullptr;
+        if ((!videoId || !videoId[0]) && !trackObj.isNull()) {
+            videoId = trackObj["videoId"] | (const char*)nullptr;
+        }
+        if (videoId && videoId[0]) {
+            trackKey = String("id:") + String(videoId);
+        } else {
+            String t = title ? String(title) : String("");
+            String a = author ? String(author) : String("");
+            if (t.length() > 0 || a.length() > 0) trackKey = t + "|" + a;
+        }
+        bool progressTrackChanged = (trackKey.length() > 0 && trackKey != lastProgressTrackKey);
+
+        // Duration parsing (numeric, string time, sec/ms variants).
+        // Prefer flat root keys first to match known-good YTMD controller behavior.
+        float songDurationSec = 0.0f;
+        float tmpSec = 0.0f;
+        if (parseJsonSeconds(root["songDuration"], &tmpSec)) songDurationSec = tmpSec;
+        if (songDurationSec <= 0.0f && parseJsonSeconds(root["durationSeconds"], &tmpSec)) songDurationSec = tmpSec;
+        if (songDurationSec <= 0.0f && !trackObj.isNull() && parseJsonSeconds(trackObj["duration"], &tmpSec)) songDurationSec = tmpSec;
+        if (songDurationSec <= 0.0f && !trackObj.isNull() && parseJsonSeconds(trackObj["durationSeconds"], &tmpSec)) songDurationSec = tmpSec;
+        if (songDurationSec <= 0.0f && !playerObj.isNull() && parseJsonSeconds(playerObj["duration"], &tmpSec)) songDurationSec = tmpSec;
+
+        // Elapsed parsing.
+        float rawElapsed = 0.0f;
+        bool hasElapsed = false;
+        float elapsedHumanSec = 0.0f;
+        bool hasElapsedHuman = false;
+        if (parseJsonSeconds(root["elapsedSeconds"], &rawElapsed)) {
+            hasElapsed = true;
+        }
+        if (!hasElapsed && !playerObj.isNull()) {
+            hasElapsedHuman = parseJsonSeconds(playerObj["seekbarCurrentPositionHuman"], &elapsedHumanSec);
+            hasElapsed = parseJsonSeconds(playerObj["seekbarCurrentPosition"], &rawElapsed);
+            if (!hasElapsed) hasElapsed = parseJsonSeconds(playerObj["elapsedSeconds"], &rawElapsed);
+        }
+        if (!hasElapsed && hasElapsedHuman) {
+            rawElapsed = elapsedHumanSec;
+            hasElapsed = true;
+        }
+
+        // Normalize duration units: prefer values consistent with human elapsed.
+        if (songDurationSec > 0.0f) {
+            if (songDurationSec > 10000.0f) {
+                // Most APIs expose ms at this magnitude (e.g. 248000).
+                songDurationSec /= 1000.0f;
+            } else if (hasElapsedHuman && songDurationSec > (elapsedHumanSec * 20.0f) && songDurationSec > 1000.0f) {
+                songDurationSec /= 1000.0f;
+            }
+        }
+
+        // Fallback: derive elapsed from statePercent if direct elapsed fields are absent.
+        if (!hasElapsed && songDurationSec > 0.0f && !playerObj.isNull()) {
+            float pct = 0.0f;
+            if (parseJsonSeconds(playerObj["statePercent"], &pct) && pct > 0.0f) {
+                if (pct > 1.0f && pct <= 100.0f) pct /= 100.0f;  // 0..100 -> 0..1
+                if (pct > 0.0f && pct <= 1.0f) {
+                    rawElapsed = pct * songDurationSec;
+                    hasElapsed = true;
+                }
+            }
+        }
+
+        float elapsedSec = hasElapsed ? rawElapsed : 0.0f;
+        // Unit sanity for elapsed: if way bigger than duration, assume ms.
+        if (songDurationSec > 0.0f && elapsedSec > (songDurationSec * 5.0f) && elapsedSec > 1000.0f) {
+            elapsedSec /= 1000.0f;
+        }
+        if (elapsedSec < 0.0f) elapsedSec = 0.0f;
 
         int durSec  = (int)songDurationSec;
         if (durSec > 0) {
+            float stableElapsed = elapsedSec;
+            // Some pear-desktop builds occasionally report elapsedSeconds=0 while playing.
+            // Avoid rewinding progress on same-track polls in that stale-zero case.
+            if (!progressTrackChanged && s_ytmd_pos_ts > 0) {
+                float projectedLocal = s_ytmd_elapsed_sec;
+                if (isPlaying) projectedLocal += (millis() - s_ytmd_pos_ts) / 1000.0f;
+                if (projectedLocal > durSec) projectedLocal = (float)durSec;
+
+                bool staleZero = hasElapsed && isPlaying && stableElapsed <= 0.1f && projectedLocal > 2.0f;
+                bool missingElapsed = !hasElapsed && isPlaying && projectedLocal > 0.0f;
+                if (staleZero || missingElapsed) {
+                    if (now - staleElapsedLogGate > 5000) {
+                        YTMD_FB_LOG("[YTMD/FB] keep local elapsed: server=%.2f local=%.2f hasElapsed=%d\n",
+                                    stableElapsed, projectedLocal, (int)hasElapsed);
+                        staleElapsedLogGate = now;
+                    }
+                    stableElapsed = projectedLocal;
+                }
+            }
+
             ytmd_duration_seconds = durSec;
             s_ytmd_dur_sec     = durSec;
-            s_ytmd_elapsed_sec = elapsedSec;
+            s_ytmd_elapsed_sec = stableElapsed;
             s_ytmd_pos_ts      = millis();
+            if (trackKey.length() > 0) lastProgressTrackKey = trackKey;
+            if (now - parseLogGate > 3000) {
+                YTMD_FB_LOG("[YTMD/FB] parsed: dur=%.2f elapsed=%.2f stable=%.2f hasElapsed=%d\n",
+                            songDurationSec, elapsedSec, stableElapsed, (int)hasElapsed);
+                parseLogGate = now;
+            }
             // Note: time labels and slider are updated by updateYtmdProgressInterp()
             // which is called every second from updateUI(). No direct label update here.
         }
 
-        // Play/Pause: player.isPaused (pear-desktop) or flat isPaused
-        bool isPaused = (!playerObj.isNull()) ? (playerObj["isPaused"] | true)
-                      : (root["isPaused"] | true);
-        bool isPlaying = !isPaused;
         if (isPlaying != ui_playing) {
             lv_obj_t* lbl = lv_obj_get_child(btn_play, 0);
             lv_label_set_text(lbl, isPlaying ? MDI_PAUSE : MDI_PLAY);
@@ -2007,7 +2255,7 @@ static void maybePollYtmdArtFallback() {
             gotArt = true;
             consecutiveFailures = 0;  // Reset backoff on success
             if (art != lastRequestedYtmdArt) {
-                Serial.printf("[YTMD/FB] Requesting art: %s\n", art.c_str());
+                YTMD_FB_LOG("[YTMD/FB] Requesting art: %s\n", art.c_str());
                 requestAlbumArt(art);
                 lastRequestedYtmdArt = art;
             }
@@ -2021,8 +2269,8 @@ static void maybePollYtmdArtFallback() {
     }
 
     if (!gotArt && (now - noDeviceLogGate > 10000)) {
-        Serial.printf("[YTMD/FB] No art URL available from pear endpoints yet (failures=%d)\n",
-                      consecutiveFailures);
+        YTMD_FB_LOG("[YTMD/FB] No art URL available from pear endpoints yet (failures=%d)\n",
+                    consecutiveFailures);
         noDeviceLogGate = now;
     }
 
@@ -2045,14 +2293,12 @@ static void updateYtmdProgressInterp() {
     int elapSec = (int)elapsed;
     int durSec  = s_ytmd_dur_sec;
 
-    char tbuf[12];
-    snprintf(tbuf, sizeof(tbuf), "%d:%02d", elapSec / 60, elapSec % 60);
+    char tbuf[16];
+    formatTimeLabel(elapSec, tbuf, sizeof(tbuf), false);
     lv_label_set_text(lbl_time, tbuf);
 
-    int rem = durSec - elapSec;
-    if (rem < 0) rem = 0;
-    char rbuf[12];
-    snprintf(rbuf, sizeof(rbuf), "-%d:%02d", rem / 60, rem % 60);
+    char rbuf[16];
+    formatTimeLabel(durSec, rbuf, sizeof(rbuf), false);
     lv_label_set_text(lbl_time_remaining, rbuf);
 
     if (!dragging_prog) {
@@ -2098,10 +2344,10 @@ static void updateAlbumArtRequest(SonosDevice* d) {
 
         if (d->currentURI.length() > 0) {
             if (actual_source_change) {
-                Serial.printf("[ART] SOURCE CHANGE: %s -> %s\n", last_source_prefix.c_str(), current_source_prefix.c_str());
+                YTMD_FB_LOG("[ART] SOURCE CHANGE: %s -> %s\n", last_source_prefix.c_str(), current_source_prefix.c_str());
                 last_source_prefix = current_source_prefix;
             } else {
-                Serial.printf("[ART] Track changed (same source: %s)\n", current_source_prefix.c_str());
+                YTMD_FB_LOG("[ART] Track changed (same source: %s)\n", current_source_prefix.c_str());
             }
             // CRITICAL: Abort any in-progress album art download immediately
             // Applies to ALL track changes (not just source changes) so the art task
@@ -2191,8 +2437,8 @@ static void updateAlbumArtRequest(SonosDevice* d) {
         if (d->isRadioStation) {
             bool hasSongArt = (artURL.length() > 0);
             bool hasStationLogo = (d->radioStationArtURL.length() > 0);
-            Serial.printf("[ART] Radio check - hasSongArt=%d, hasStationLogo=%d, artURL='%s', stationURL='%s'\n",
-                         hasSongArt, hasStationLogo, artURL.c_str(), d->radioStationArtURL.c_str());
+            YTMD_FB_LOG("[ART] Radio check - hasSongArt=%d, hasStationLogo=%d, artURL='%s', stationURL='%s'\n",
+                        hasSongArt, hasStationLogo, artURL.c_str(), d->radioStationArtURL.c_str());
 
             // If no song art but have station logo, use the logo
             if (!hasSongArt && hasStationLogo) {
@@ -2336,14 +2582,10 @@ void updateUI() {
     if (t.startsWith("0:")) t = t.substring(2);
     lv_label_set_text(lbl_time, t.c_str());
 
-    // Remaining time as negative countdown: -M:SS (Apple Music / Spotify style)
+    // Total duration (fixed): M:SS / H:MM:SS
     if (d->durationSeconds > 0) {
-        int rem = d->durationSeconds - d->relTimeSeconds;
-        if (rem < 0) rem = 0;
-        int rm = rem / 60;
-        int rs = rem % 60;
         char buf[16];
-        snprintf(buf, sizeof(buf), "-%d:%02d", rm, rs);
+        formatTimeLabel(d->durationSeconds, buf, sizeof(buf), false);
         lv_label_set_text(lbl_time_remaining, buf);
     }
 

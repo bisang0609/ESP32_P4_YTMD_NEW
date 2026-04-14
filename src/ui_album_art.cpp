@@ -34,6 +34,18 @@ static uint16_t* sw_jpeg_output = nullptr;
 static int sw_jpeg_width = 0;
 static int sw_jpeg_height = 0;
 
+#ifndef ART_VERBOSE_LOGS
+#define ART_VERBOSE_LOGS 0
+#endif
+
+#if ART_VERBOSE_LOGS
+#define ART_VLOG(...) Serial.printf(__VA_ARGS__)
+#define ART_VLOGLN(msg) Serial.println(msg)
+#else
+#define ART_VLOG(...) do {} while (0)
+#define ART_VLOGLN(msg) do {} while (0)
+#endif
+
 // ── Pre-connect helpers ───────────────────────────────────────────────────────
 // Root cause of pkt_rxbuff :928: server blasts initial TCP cwnd (~10 segments)
 // into C6 pkt_rxbuff before P4 lwIP can ACK. SO_RCVBUF does NOT control the
@@ -62,6 +74,101 @@ static bool artParseHttpHost(const char* url, char* host_buf, size_t host_buf_le
     memcpy(host_buf, p, host_len);
     host_buf[host_len] = '\0';
     return true;
+}
+
+static int parseDecIntAt(const String& s, int start, int* out) {
+    if (!out || start < 0 || start >= (int)s.length() || !isDigit((unsigned char)s.charAt(start))) return -1;
+    long v = 0;
+    int i = start;
+    while (i < (int)s.length() && isDigit((unsigned char)s.charAt(i))) {
+        v = v * 10 + (s.charAt(i) - '0');
+        if (v > 100000) break;
+        ++i;
+    }
+    *out = (int)v;
+    return i;
+}
+
+// Best-effort size extraction for debug logs.
+// Supports common forms:
+//  - "...=w200-h200..."
+//  - "...=s200..."
+//  - "...?width=600&height=600..."
+//  - ".../600x600..."
+static bool extractArtSizeFromUrl(const String& url, int* outW, int* outH) {
+    if (!outW || !outH) return false;
+    *outW = 0;
+    *outH = 0;
+
+    int eqPos = url.lastIndexOf('=');
+    if (eqPos >= 0 && eqPos + 1 < (int)url.length()) {
+        int p = eqPos + 1;
+        char mode = url.charAt(p);
+        if (mode == 'w' || mode == 's') {
+            int a = 0;
+            int n = parseDecIntAt(url, p + 1, &a);
+            if (n > 0) {
+                if (mode == 's') {
+                    *outW = a;
+                    *outH = a;
+                    return true;
+                }
+                if (n + 2 < (int)url.length() && url.charAt(n) == '-' && url.charAt(n + 1) == 'h') {
+                    int b = 0;
+                    int m = parseDecIntAt(url, n + 2, &b);
+                    if (m > 0) {
+                        *outW = a;
+                        *outH = b;
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    int wPos = url.indexOf("width=");
+    int hPos = url.indexOf("height=");
+    if (wPos >= 0 && hPos >= 0) {
+        int w = 0, h = 0;
+        int wn = parseDecIntAt(url, wPos + 6, &w);
+        int hn = parseDecIntAt(url, hPos + 7, &h);
+        if (wn > 0 && hn > 0) {
+            *outW = w;
+            *outH = h;
+            return true;
+        }
+    }
+
+    for (int x = 1; x < (int)url.length() - 1; ++x) {
+        if (url.charAt(x) != 'x') continue;
+        int ls = x - 1;
+        while (ls >= 0 && isDigit((unsigned char)url.charAt(ls))) ls--;
+        ls++;
+        int re = x + 1;
+        while (re < (int)url.length() && isDigit((unsigned char)url.charAt(re))) re++;
+        if (ls < x && (x + 1) < re) {
+            int w = 0, h = 0;
+            if (parseDecIntAt(url, ls, &w) > 0 && parseDecIntAt(url, x + 1, &h) > 0) {
+                if (w > 0 && h > 0 && w <= 10000 && h <= 10000) {
+                    *outW = w;
+                    *outH = h;
+                    return true;
+                }
+            }
+        }
+    }
+
+    if (url.indexOf("i.ytimg.com/vi/") >= 0) {
+        if (url.indexOf("/mqdefault.jpg") >= 0) { *outW = 320;  *outH = 180; return true; }
+        if (url.indexOf("/hqdefault.jpg") >= 0) { *outW = 480;  *outH = 360; return true; }
+        if (url.indexOf("/sddefault.jpg") >= 0) { *outW = 640;  *outH = 480; return true; }
+        if (url.indexOf("/hq720.jpg") >= 0 || url.indexOf("/hq720_live.jpg") >= 0) {
+            *outW = 1280; *outH = 720; return true;
+        }
+        if (url.indexOf("/maxresdefault.jpg") >= 0) { *outW = 1280; *outH = 720; return true; }
+        if (url.indexOf("/default.jpg") >= 0) { *outW = 120; *outH = 90; return true; }
+    }
+    return false;
 }
 
 // Strip HTTP chunked transfer encoding in-place.
@@ -173,6 +280,7 @@ static WiFiClient artPreConnectHTTP(const char* url, int timeout_ms) {
 
 // ── Diagnostic logging helpers ────────────────────────────────────────────────
 static void artLogSDIO(const char* tag) {
+#if ART_VERBOSE_LOGS
     unsigned long now = millis();
     Serial.printf("[ART/%s] SDIO: 500=%ldms net=%ldms https=%ldms q=%ldms art_end=%ldms adlp=%d\n", tag,
         last_transient_500_ms    ? (long)(now - last_transient_500_ms)    : -1L,
@@ -181,13 +289,20 @@ static void artLogSDIO(const char* tag) {
         last_queue_fetch_time    ? (long)(now - last_queue_fetch_time)    : -1L,
         last_art_download_end_ms ? (long)(now - last_art_download_end_ms) : -1L,
         (int)art_download_in_progress);
+#else
+    (void)tag;
+#endif
 }
 static void artLogMem(const char* tag) {
+#if ART_VERBOSE_LOGS
     Serial.printf("[ART/%s] MEM: heap=%u dma=%u psram=%u stk=%u\n", tag,
         heap_caps_get_free_size(MALLOC_CAP_DEFAULT),
         heap_caps_get_free_size(MALLOC_CAP_DMA),
         heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
         uxTaskGetStackHighWaterMark(NULL));
+#else
+    (void)tag;
+#endif
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -499,6 +614,38 @@ struct DecodeResult {
 };
 static const DecodeResult kDecodeFail = {nullptr, 0, 0, 0, false};
 
+static inline int alignUpInt(int value, int alignment) {
+    return ((value + alignment - 1) / alignment) * alignment;
+}
+
+static void getJpegMcuSize(jpeg_down_sampling_type_t sample_method, int* mcux, int* mcuy) {
+    // esp_driver_jpeg pads decode output to MCU boundaries, not always 16x16.
+    // Wrong stride here causes per-line address skew and horizontal distortion.
+    switch (sample_method) {
+        case JPEG_DOWN_SAMPLING_YUV444:
+            *mcux = 8;
+            *mcuy = 8;
+            break;
+        case JPEG_DOWN_SAMPLING_YUV422:
+            *mcux = 16;
+            *mcuy = 8;
+            break;
+        case JPEG_DOWN_SAMPLING_YUV420:
+            *mcux = 16;
+            *mcuy = 16;
+            break;
+        case JPEG_DOWN_SAMPLING_GRAY:
+            *mcux = 8;
+            *mcuy = 8;
+            break;
+        default:
+            // Conservative fallback.
+            *mcux = 16;
+            *mcuy = 16;
+            break;
+    }
+}
+
 // ── Unified decode dispatcher ──────────────────────────────────────────────────
 // Detects format, strips COM markers, dispatches to the appropriate decoder.
 // On success: returns allocated PSRAM RGB565 buffer — caller must heap_caps_free(result.pixels).
@@ -622,10 +769,14 @@ static DecodeResult decodeToRGB565(uint8_t* buf, size_t len, bool isJPEG, bool i
                         use_sw_fallback = true;
                     } else {
                         // HW FAST PATH
-                        int out_w = ((w + 15) / 16) * 16;
-                        int out_h = ((h + 15) / 16) * 16;
+                        // Use sample-method MCU alignment to match esp_driver_jpeg process_h/process_v.
+                        int mcux = 16, mcuy = 16;
+                        getJpegMcuSize(pic_info.sample_method, &mcux, &mcuy);
+                        int out_w = alignUpInt(w, mcux);
+                        int out_h = alignUpInt(h, mcuy);
                         bool is_grayscale = (pic_info.sample_method == JPEG_DOWN_SAMPLING_GRAY);
-                        Serial.printf("[ART] JPEG: %dx%d (output: %dx%d)%s\n", w, h, out_w, out_h,
+                        Serial.printf("[ART] JPEG: %dx%d (output: %dx%d, MCU %dx%d)%s\n",
+                                      w, h, out_w, out_h, mcux, mcuy,
                                       is_grayscale ? " [GRAYSCALE]" : "");
                         size_t bytes_per_pixel = is_grayscale ? 1 : 2;
                         size_t decoded_size_hw = (size_t)out_w * out_h * bytes_per_pixel;
@@ -742,9 +893,9 @@ static DecodeResult decodeToRGB565(uint8_t* buf, size_t len, bool isJPEG, bool i
 // ── Scale decoded pixels to 420×420 and push to display ───────────────────────
 static void displayArt(const DecodeResult& dec, const char* url) {
     memset(art_temp_buffer, 0, ART_SIZE * ART_SIZE * 2);
-    Serial.printf("[ART] Bilinear scaling %dx%d -> 420x420 (stride=%d)\n", dec.w, dec.h, dec.stride);
+    ART_VLOG("[ART] Bilinear scaling %dx%d -> 420x420 (stride=%d)\n", dec.w, dec.h, dec.stride);
     scaleImageBilinear(dec.pixels, dec.w, dec.h, dec.stride, art_temp_buffer, ART_SIZE, ART_SIZE);
-    Serial.println("[ART] Scaling complete");
+    ART_VLOGLN("[ART] Scaling complete");
 
     sampleDominantColor(art_temp_buffer, ART_SIZE, ART_SIZE);
     uint32_t new_color = 0x1a1a1a;
@@ -871,14 +1022,14 @@ static bool fetchPearDesktopImageSrc(String& outImageUrl) {
         http.addHeader("Authorization", auth_header);
         http.setTimeout(2500);
         int code = http.GET();
-        Serial.printf("[ART] pear-desktop GET %s -> HTTP %d\n", api_url, code);
+        ART_VLOG("[ART] pear-desktop GET %s -> HTTP %d\n", api_url, code);
 
         if (code == 404) {
             http.end();
             continue;
         }
         if (code != 200) {
-            Serial.printf("[ART] pear endpoint non-200 (%d), path=%s\n", code, song_paths[i]);
+            ART_VLOG("[ART] pear endpoint non-200 (%d), path=%s\n", code, song_paths[i]);
             http.end();
             return false;
         }
@@ -903,8 +1054,8 @@ static bool fetchPearDesktopImageSrc(String& outImageUrl) {
             DeserializationOption::NestingLimit(48)
         );
         if (err) {
-            Serial.printf("[ART] pear-desktop JSON parse failed: %s\n", err.c_str());
-            Serial.printf("[ART] pear response head: %.220s\n", resp.c_str());
+            ART_VLOG("[ART] pear-desktop JSON parse failed: %s\n", err.c_str());
+            ART_VLOG("[ART] pear response head: %.220s\n", resp.c_str());
             continue;
         }
 
@@ -975,13 +1126,21 @@ static bool fetchPearDesktopImageSrc(String& outImageUrl) {
                 if (eqPos > 0 && (eqPos + 1) < (int)outImageUrl.length()) {
                     char suffix = outImageUrl.charAt(eqPos + 1);
                     if (suffix == 'w' || suffix == 's') {
-                        outImageUrl = outImageUrl.substring(0, eqPos) + "=w400-h400";
+                        // Keep moderate size for clearer visuals while still constraining payload.
+                        outImageUrl = outImageUrl.substring(0, eqPos) + "=w300-h300";
                     }
                 }
             }
+            if (outImageUrl.indexOf("i.ytimg.com/vi/") > 0) {
+                outImageUrl.replace("/maxresdefault.jpg", "/mqdefault.jpg");
+                outImageUrl.replace("/sddefault.jpg", "/mqdefault.jpg");
+                outImageUrl.replace("/hq720.jpg", "/mqdefault.jpg");
+                outImageUrl.replace("/hq720_live.jpg", "/mqdefault.jpg");
+                outImageUrl.replace("/hqdefault.jpg", "/mqdefault.jpg");
+            }
             return true;
         }
-        Serial.printf("[ART] pear response had no image URL, trying next endpoint (path=%s)\n", song_paths[i]);
+        ART_VLOG("[ART] pear response had no image URL, trying next endpoint (path=%s)\n", song_paths[i]);
     }
     return false;
 }
@@ -998,14 +1157,14 @@ static String prepareAlbumArtURL(const String& rawUrl) {
         markIndex = fetchUrl.indexOf("mark=https");
     }
     if (fetchUrl.indexOf("sonosradio.imgix.net") != -1 && markIndex != -1) {
-        Serial.println("[ART] Sonos Radio art detected");
+        ART_VLOGLN("[ART] Sonos Radio art detected");
         int markStart = markIndex + 5;  // After "mark="
         int markEnd = fetchUrl.indexOf("&", markStart);
         if (markEnd == -1) markEnd = fetchUrl.length();
 
         fetchUrl = fetchUrl.substring(markStart, markEnd);
         is_sonos_radio_art = true;
-        Serial.printf("[ART] Extracted: %s\n", fetchUrl.c_str());
+        ART_VLOG("[ART] Extracted: %s\n", fetchUrl.c_str());
     }
 
     // Plex Media Server photo transcoder: bump small thumbnail requests to 600px.
@@ -1040,6 +1199,29 @@ static String prepareAlbumArtURL(const String& rawUrl) {
     }
     // Spotify: Keep original resolution (640x640) since HTTP is lightweight
     // No size reduction needed - HTTP has no TLS overhead!
+
+    // Google-hosted artwork can still burst hard on some AP/SDIO combos.
+    // Force a moderate variant to balance image quality and SDIO stability.
+    if (fetchUrl.indexOf("googleusercontent.com") != -1 ||
+        fetchUrl.indexOf("ytimg.com") != -1 ||
+        fetchUrl.indexOf("ggpht.com") != -1) {
+        int eqPos = fetchUrl.lastIndexOf('=');
+        if (eqPos > 0 && (eqPos + 1) < (int)fetchUrl.length()) {
+            char suffix = fetchUrl.charAt(eqPos + 1);
+            if (suffix == 'w' || suffix == 's') {
+                fetchUrl = fetchUrl.substring(0, eqPos) + "=w300-h300";
+            }
+        }
+    }
+
+    // ytimg path-style thumbnails ignore '=w..-h..' params; normalize filename variant directly.
+    if (fetchUrl.indexOf("i.ytimg.com/vi/") != -1) {
+        fetchUrl.replace("/maxresdefault.jpg", "/mqdefault.jpg");
+        fetchUrl.replace("/sddefault.jpg", "/mqdefault.jpg");
+        fetchUrl.replace("/hq720.jpg", "/mqdefault.jpg");
+        fetchUrl.replace("/hq720_live.jpg", "/mqdefault.jpg");
+        fetchUrl.replace("/hqdefault.jpg", "/mqdefault.jpg");
+    }
 
     // Universal HTTP downgrade: try HTTP for all art HTTPS URLs.
     // This keeps TLS overhead out of the art path for SDIO stability.
@@ -1143,7 +1325,7 @@ void albumArtTask(void* param) {
         Serial.printf("[ART] Failed to init hardware JPEG decoder: %d\n", ret);
         hw_jpeg_decoder = nullptr;
     } else {
-        Serial.println("[ART] Hardware JPEG decoder initialized!");
+        ART_VLOGLN("[ART] Hardware JPEG decoder initialized!");
     }
 
     static char url[512];
@@ -1214,7 +1396,7 @@ void albumArtTask(void* param) {
             //   - flag=false during sdioPreWait → polling runs → SDIO stays warm → no clock-gate
             //     → storm gate drains pkt_rxbuff → server burst fits → no :928 crash
             art_download_in_progress = false;
-            Serial.printf("[ART] URL: %s\n", url);
+            ART_VLOG("[ART] URL: %s\n", url);
 
             // LRU cache check — serve instantly without network if we already have this art
             {
@@ -1222,7 +1404,7 @@ void albumArtTask(void* param) {
                 for (int i = 0; i < 2; i++) {
                     if (art_cache[i].valid && art_cache[i].pixels &&
                         strncmp(art_cache[i].url, url, sizeof(art_cache[i].url)) == 0) {
-                        Serial.printf("[ART] Cache hit slot %d — skipping download\n", i);
+                        ART_VLOG("[ART] Cache hit slot %d — skipping download\n", i);
                         if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
                             memcpy(art_buffer, art_cache[i].pixels, ART_SIZE * ART_SIZE * 2);
                             last_art_url = url;
@@ -1241,7 +1423,7 @@ void albumArtTask(void* param) {
 
             // Simple WiFi check - don't try to download if not connected
             if (WiFi.status() != WL_CONNECTED) {
-                Serial.println("[ART] WiFi not connected, skipping");
+                ART_VLOGLN("[ART] WiFi not connected, skipping");
                 // Mark as done to prevent retry loop when WiFi is down
                 if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
                     last_art_url = url;
@@ -1290,9 +1472,9 @@ void albumArtTask(void* param) {
                 // Read DMA ONCE: same value used for the log and the check (TOCTOU fix).
                 size_t dma_snap = heap_caps_get_free_size(MALLOC_CAP_DMA);
                 artLogSDIO("flag-set");
-                Serial.printf("[ART/flag-set] MEM: heap=%u dma=%u psram=%u stk=%u\n",
-                    heap_caps_get_free_size(MALLOC_CAP_DEFAULT), (unsigned)dma_snap,
-                    heap_caps_get_free_size(MALLOC_CAP_SPIRAM), uxTaskGetStackHighWaterMark(NULL));
+                ART_VLOG("[ART/flag-set] MEM: heap=%u dma=%u psram=%u stk=%u\n",
+                         heap_caps_get_free_size(MALLOC_CAP_DEFAULT), (unsigned)dma_snap,
+                         heap_caps_get_free_size(MALLOC_CAP_SPIRAM), uxTaskGetStackHighWaterMark(NULL));
                 // Count consecutive DMA-too-low aborts across ANY URL.
                 // Per-URL tracking was wrong: new song = new URL = counter reset = WiFi recovery never fires.
                 static int dma_fail_count = 0;
@@ -1349,7 +1531,7 @@ void albumArtTask(void* param) {
                 }
 
                 if (mutex_acquired) {
-                    Serial.printf("[ART/mutex] acquired after %lums\n", millis() - t_mutex_start);
+                    ART_VLOG("[ART/mutex] acquired after %lums\n", millis() - t_mutex_start);
                     artLogMem("mutex");
                     artLogSDIO("mutex");
                     // ABORT CHECK: If track changed while waiting for mutex, bail out immediately
@@ -1424,32 +1606,32 @@ void albumArtTask(void* param) {
                     // Keeps inside-mutex wait ≤ 200ms — longer waits block pollingTask (holds
                     // network_mutex) → SDIO idle → P4 DMA clock-gate → pkt_rxbuff overflow.
                     // TCP FIN-ACK on LAN completes in <5ms; 200ms is more than sufficient.
-                    if (last_transient_500_ms > 0) {
-                        unsigned long elapsed = millis() - last_transient_500_ms;
-                        if (elapsed < SDIO_TCP_CLOSE_MS) {
-                            Serial.printf("[ART] Post-500 drain: waiting %lums\n", SDIO_TCP_CLOSE_MS - elapsed);
-                            vTaskDelay(pdMS_TO_TICKS(SDIO_TCP_CLOSE_MS - elapsed));
-                        }
+                if (last_transient_500_ms > 0) {
+                    unsigned long elapsed = millis() - last_transient_500_ms;
+                    if (elapsed < SDIO_TCP_CLOSE_MS) {
+                        ART_VLOG("[ART] Post-500 drain: waiting %lums\n", SDIO_TCP_CLOSE_MS - elapsed);
+                        vTaskDelay(pdMS_TO_TICKS(SDIO_TCP_CLOSE_MS - elapsed));
                     }
+                }
 
                     // For Sonos proxy art URLs (/getaa), try pear-desktop's imageSrc first.
                     // If this fails, keep using the original Sonos URL path.
                     if (strstr(url, "/getaa?") != nullptr &&
                         ytmd_ip.length() > 0 &&
                         ytmd_token.length() > 0) {
-                        Serial.printf("[ART] Sonos getaa detected, trying pear API override (orig=%s)\n", url);
+                        ART_VLOG("[ART] Sonos getaa detected, trying pear API override (orig=%s)\n", url);
                         String pearImageUrl;
                         if (fetchPearDesktopImageSrc(pearImageUrl)) {
                             String preparedPearUrl = prepareAlbumArtURL(pearImageUrl);
                             if (preparedPearUrl.length() > 0) {
                                 strncpy(url, preparedPearUrl.c_str(), sizeof(url) - 1);
                                 url[sizeof(url) - 1] = '\0';
-                                Serial.printf("[ART] Using pear-desktop imageSrc: %s\n", url);
+                                ART_VLOG("[ART] Using pear-desktop imageSrc: %s\n", url);
                             } else {
-                                Serial.println("[ART] pear image URL empty after prepare(), keeping Sonos getaa");
+                                ART_VLOGLN("[ART] pear image URL empty after prepare(), keeping Sonos getaa");
                             }
                         } else {
-                            Serial.println("[ART] pear API override unavailable, keeping Sonos getaa");
+                            ART_VLOGLN("[ART] pear API override unavailable, keeping Sonos getaa");
                         }
                     }
 
@@ -1469,10 +1651,10 @@ void albumArtTask(void* param) {
                         int pre_timeout = isLocalNetwork ? 3000 : 10000;
                         preClient = artPreConnectHTTP(url, pre_timeout);
                         if (preClient.connected()) {
-                            Serial.printf("[ART] TCP pre-connect OK fd=%d SO_RCVBUF=%d\n", preClient.fd(), ART_TCP_RCVBUF);
+                            ART_VLOG("[ART] TCP pre-connect OK fd=%d SO_RCVBUF=%d\n", preClient.fd(), ART_TCP_RCVBUF);
                             http.begin(preClient, url);
                         } else {
-                            Serial.println("[ART] TCP pre-connect FAILED — fallback http.begin() (NO SO_RCVBUF!)");
+                            ART_VLOGLN("[ART] TCP pre-connect FAILED — fallback http.begin() (NO SO_RCVBUF!)");
                             http.begin(url);
                         }
                     }
@@ -1551,14 +1733,23 @@ void albumArtTask(void* param) {
                             }
                         }
                     }
-                    Serial.printf("[ART] GET+drain → code=%d in %lums (drained=%u/%d DMA=%uKB)\n",
-                        code, millis() - t_get, (unsigned)pre_drained, full_drain_target,
-                        (unsigned)(heap_caps_get_free_size(MALLOC_CAP_DMA) / 1024));
+                    ART_VLOG("[ART] GET+drain → code=%d in %lums (drained=%u/%d DMA=%uKB)\n",
+                             code, millis() - t_get, (unsigned)pre_drained, full_drain_target,
+                             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_DMA) / 1024));
                     // Keep mutex locked for entire download
 
                     if (code == 200) {
                 int len = full_drain_target > 0 ? full_drain_target : http.getSize();
                 const bool len_known = (len > 0);
+                int dbgW = 0, dbgH = 0;
+                bool dbgHasSize = extractArtSizeFromUrl(String(url), &dbgW, &dbgH);
+                if (dbgHasSize) {
+                    Serial.printf("[ART/DBG] url_size=%dx%d content_len=%d drained=%u\n",
+                                  dbgW, dbgH, len, (unsigned)pre_drained);
+                } else {
+                    Serial.printf("[ART/DBG] url_size=unknown content_len=%d drained=%u\n",
+                                  len, (unsigned)pre_drained);
+                }
                 if ((len_known && len < (int)max_art_size) || !len_known) {
                     size_t alloc_len = len_known ? (size_t)len : max_art_size;
                     // jpgBuf points to the static 280KB PSRAM buffer (art_jpgbuf).
@@ -1566,17 +1757,17 @@ void albumArtTask(void* param) {
                     // alloc_len ≤ MAX_ART_SIZE, so the buffer is always large enough.
 
                     if (len_known) {
-                        Serial.printf("[ART] Downloading album art: %d bytes\n", len);
+                        ART_VLOG("[ART] Downloading album art: %d bytes\n", len);
                     } else {
-                        Serial.println("[ART] Downloading album art: unknown length");
+                        ART_VLOGLN("[ART] Downloading album art: unknown length");
                     }
                     artLogMem("dl-start");
                     // DL-start DMA check — after pre-drain, burst pbufs should be freed.
                     // If DMA still low (pre-drain insufficient or alloc failed), abort.
                     size_t dma_dl_start = heap_caps_get_free_size(MALLOC_CAP_DMA);
-                    Serial.printf("[ART/burst] pre-GET=%u dl-start=%u burst=%u bytes\n",
-                                  (unsigned)dma_pre_get, (unsigned)dma_dl_start,
-                                  dma_pre_get > dma_dl_start ? (unsigned)(dma_pre_get - dma_dl_start) : 0u);
+                    ART_VLOG("[ART/burst] pre-GET=%u dl-start=%u burst=%u bytes\n",
+                             (unsigned)dma_pre_get, (unsigned)dma_dl_start,
+                             dma_pre_get > dma_dl_start ? (unsigned)(dma_pre_get - dma_dl_start) : 0u);
                     if (dma_dl_start < ART_TCP_RCVBUF_DL_SAFETY || !jpgBuf) {
                         if (!jpgBuf)
                             Serial.println("[ART] art_jpgbuf unavailable — aborting");
@@ -1611,8 +1802,8 @@ void albumArtTask(void* param) {
                             int rcvbuf = ART_TCP_RCVBUF;
                             int stream_fd = stream->fd();
                             int pre_fd   = preClient.connected() ? preClient.fd() : -1;
-                            Serial.printf("[ART] stream->fd()=%d preClient.fd()=%d SO_RCVBUF=%d\n",
-                                          stream_fd, pre_fd, rcvbuf);
+                            ART_VLOG("[ART] stream->fd()=%d preClient.fd()=%d SO_RCVBUF=%d\n",
+                                     stream_fd, pre_fd, rcvbuf);
                             if (stream_fd >= 0) {
                                 lwip_setsockopt(stream_fd, SOL_SOCKET, SO_RCVBUF,
                                                 &rcvbuf, sizeof(rcvbuf));
@@ -1679,8 +1870,8 @@ void albumArtTask(void* param) {
                             bytesRead += actualRead;
                             // Log every ~80KB (20 chunks × 4KB)
                             if (chunkSize > 0 && (bytesRead / chunkSize) % 20 == 1 && bytesRead < (size_t)(len > 0 ? len : (int)alloc_len)) {
-                                Serial.printf("[ART] DL progress: %u/%d bytes avail=%u conn=%d\n",
-                                    (unsigned)bytesRead, len, (unsigned)stream->available(), (int)stream->connected());
+                                ART_VLOG("[ART] DL progress: %u/%d bytes avail=%u conn=%d\n",
+                                         (unsigned)bytesRead, len, (unsigned)stream->available(), (int)stream->connected());
                             }
                             // 5ms inter-chunk yield: gives lwIP uninterrupted time between reads
                             // to drain any background WiFi frames (Sonos SSDP/mDNS multicast
@@ -1707,7 +1898,8 @@ void albumArtTask(void* param) {
                             readSuccess = false;
                         }
 
-                        Serial.printf("[ART] Album art read: %d bytes (len_known=%d) in %lums\n", (int)bytesRead, len_known ? 1 : 0, millis() - t_dl_start);
+                        ART_VLOG("[ART] Album art read: %d bytes (len_known=%d) in %lums\n",
+                                 (int)bytesRead, len_known ? 1 : 0, millis() - t_dl_start);
 
                         // If download failed/aborted, close connection and free TLS/DMA resources
                         if (!readSuccess) {
@@ -1807,6 +1999,8 @@ void albumArtTask(void* param) {
                                                               isJPEG, isPNG);
                             artLogMem("post-decode");  // DMA after decode — delta shows JPEG DMA cost
                             if (dec.ok) {
+                                Serial.printf("[ART/DBG] decoded=%dx%d stride=%d downloaded=%d\n",
+                                              dec.w, dec.h, dec.stride, read);
                                 displayArt(dec, url);
                                 heap_caps_free(dec.pixels);
                                 consecutive_failures = 0;
@@ -1979,6 +2173,12 @@ String urlEncode(const char* url) {
 
 void requestAlbumArt(const String& url) {
     if (url.length() == 0) return;
+    int reqW = 0, reqH = 0;
+    if (extractArtSizeFromUrl(url, &reqW, &reqH)) {
+        Serial.printf("[ART/REQ] pending size=%dx%d url=%s\n", reqW, reqH, url.c_str());
+    } else {
+        Serial.printf("[ART/REQ] pending size=unknown url=%s\n", url.c_str());
+    }
     if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(10))) {
         pending_art_url = url;
         xSemaphoreGive(art_mutex);
