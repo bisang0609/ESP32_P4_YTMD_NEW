@@ -75,6 +75,7 @@ extern int    ytmd_port;
 extern String ytmd_auth_code;
 extern String ytmd_token;         // pear-desktop Bearer access token
 extern lv_obj_t *lbl_ytmd_status;
+extern int ytmd_duration_seconds; // Track duration from last /api/v1/song poll (for seek)
 
 // Main screen UI elements
 extern lv_obj_t *img_album, *lbl_title, *lbl_artist, *lbl_album, *lbl_time, *lbl_time_remaining;

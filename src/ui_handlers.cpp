@@ -56,27 +56,95 @@ void checkAutoDim() {
 }
 
 // ============================================================================
+// YTMD (pear-desktop) API Helpers
+// ============================================================================
+
+// Returns true when operating in YTMD-only mode (no real Sonos device active).
+static bool isYtmdMode() {
+    SonosDevice* d = sonos.getCurrentDevice();
+    return !d || (d->rinconID == "YTMD_VIRTUAL");
+}
+
+// POST to pear-desktop API with bearer token authentication.
+// Called from UI task for playback commands — short timeout to avoid touch freeze.
+// Returns HTTP response code (200 = success, negative = connection error).
+static int ytmdApiPost(const char* path, const char* body = nullptr) {
+    if (ytmd_ip.length() == 0 || ytmd_token.length() == 0) return -1;
+    if (WiFi.status() != WL_CONNECTED) return -1;
+
+    if (!network_mutex || xSemaphoreTake(network_mutex, pdMS_TO_TICKS(150)) != pdTRUE) {
+        return -1;
+    }
+
+    char url[192];
+    snprintf(url, sizeof(url), "http://%s:%d%s",
+             ytmd_ip.c_str(),
+             (ytmd_port > 0 ? ytmd_port : YTMD_DEFAULT_PORT),
+             path);
+    char auth[300];
+    snprintf(auth, sizeof(auth), "Bearer %s", ytmd_token.c_str());
+
+    HTTPClient http;
+    http.begin(url);
+    http.addHeader("Authorization", auth);
+    http.addHeader("Content-Type", "application/json");
+    http.setTimeout(1500);
+
+    int code;
+    if (body && strlen(body) > 0) {
+        code = http.POST((uint8_t*)body, strlen(body));
+    } else {
+        code = http.POST("");
+    }
+    http.end();
+    xSemaphoreGive(network_mutex);
+
+    Serial.printf("[YTMD] POST %s -> HTTP %d\n", path, code);
+    return code;
+}
+
+// ============================================================================
 // Playback Event Handlers
 // ============================================================================
 void ev_play(lv_event_t* e) {
+    if (isYtmdMode()) {
+        ytmdApiPost("/api/v1/play-pause");
+        return;
+    }
     SonosDevice* d = sonos.getCurrentDevice();
     if (d) d->isPlaying ? sonos.pause() : sonos.play();
 }
 
 void ev_prev(lv_event_t* e) {
+    if (isYtmdMode()) {
+        ytmdApiPost("/api/v1/previous");
+        return;
+    }
     sonos.previous();
 }
 
 void ev_next(lv_event_t* e) {
+    if (isYtmdMode()) {
+        ytmdApiPost("/api/v1/next");
+        return;
+    }
     sonos.next();
 }
 
 void ev_shuffle(lv_event_t* e) {
+    if (isYtmdMode()) {
+        ytmdApiPost("/api/v1/shuffle", "{}");
+        return;
+    }
     SonosDevice* d = sonos.getCurrentDevice();
     if (d) sonos.setShuffle(!d->shuffleMode);
 }
 
 void ev_repeat(lv_event_t* e) {
+    if (isYtmdMode()) {
+        ytmdApiPost("/api/v1/repeat-mode", "{}");
+        return;
+    }
     SonosDevice* d = sonos.getCurrentDevice();
     if (!d) return;
     if (d->repeatMode == "NONE") sonos.setRepeat("ALL");
@@ -86,19 +154,38 @@ void ev_repeat(lv_event_t* e) {
 
 void ev_progress(lv_event_t* e) {
     lv_event_code_t code = lv_event_get_code(e);
-    if (code == LV_EVENT_PRESSING) dragging_prog = true;
-    else if (code == LV_EVENT_RELEASED) {
-        SonosDevice* d = sonos.getCurrentDevice();
-        if (d && d->durationSeconds > 0) sonos.seek((lv_slider_get_value(slider_progress) * d->durationSeconds) / 100);
+    if (code == LV_EVENT_PRESSING) {
+        dragging_prog = true;
+    } else if (code == LV_EVENT_RELEASED) {
+        if (isYtmdMode()) {
+            if (ytmd_duration_seconds > 0) {
+                int seekSec = (lv_slider_get_value(slider_progress) * ytmd_duration_seconds) / 100;
+                char body[32];
+                snprintf(body, sizeof(body), "{\"seconds\":%d}", seekSec);
+                ytmdApiPost("/api/v1/seek-to", body);
+            }
+        } else {
+            SonosDevice* d = sonos.getCurrentDevice();
+            if (d && d->durationSeconds > 0)
+                sonos.seek((lv_slider_get_value(slider_progress) * d->durationSeconds) / 100);
+        }
         dragging_prog = false;
     }
 }
 
 void ev_vol_slider(lv_event_t* e) {
     lv_event_code_t code = lv_event_get_code(e);
-    if (code == LV_EVENT_PRESSING) dragging_vol = true;
-    else if (code == LV_EVENT_RELEASED) {
-        sonos.setVolume(lv_slider_get_value(slider_vol));
+    if (code == LV_EVENT_PRESSING) {
+        dragging_vol = true;
+    } else if (code == LV_EVENT_RELEASED) {
+        if (isYtmdMode()) {
+            int vol = lv_slider_get_value(slider_vol);
+            char body[24];
+            snprintf(body, sizeof(body), "{\"volume\":%d}", vol);
+            ytmdApiPost("/api/v1/volume", body);
+        } else {
+            sonos.setVolume(lv_slider_get_value(slider_vol));
+        }
         dragging_vol = false;
     }
 }
@@ -1641,7 +1728,7 @@ static String extractYtmdArtUrl(JsonVariantConst root) {
         if (eqPos > 0 && (eqPos + 1) < (int)artUrl.length()) {
             char suffix = artUrl.charAt(eqPos + 1);
             if (suffix == 'w' || suffix == 's') {
-                artUrl = artUrl.substring(0, eqPos) + "=w400-h400";
+                artUrl = artUrl.substring(0, eqPos) + "=w200-h200";
             }
         }
     }
@@ -1653,15 +1740,26 @@ static bool isYtmdVirtualDevice(const SonosDevice* d) {
     return d && d->rinconID == "YTMD_VIRTUAL";
 }
 
+// Shared interpolation state — written by poll, read by updateYtmdProgressInterp()
+static float         s_ytmd_elapsed_sec  = 0.0f;
+static int           s_ytmd_dur_sec      = 0;
+static bool          s_ytmd_is_playing   = false;
+static unsigned long s_ytmd_pos_ts       = 0;   // millis() when elapsed was last polled
+
 // Fallback path for builds where no Sonos device is active:
 // poll pear-desktop directly and feed album art into the existing art task.
+// Uses short timeout + exponential backoff on failure to avoid blocking the UI task.
 static void maybePollYtmdArtFallback() {
     static unsigned long lastPollMs = 0;
     static String lastRequestedYtmdArt = "";
     static uint32_t noDeviceLogGate = 0;
+    static int consecutiveFailures = 0;
+    // Backoff intervals (ms): 3s, 10s, 30s, 60s — caps at 60s after 4+ failures
+    static const uint32_t kBackoffMs[] = {3000, 10000, 30000, 60000};
 
     const uint32_t now = millis();
-    if (now - lastPollMs < 3000) return;
+    int backoffIdx = consecutiveFailures < 4 ? consecutiveFailures : 3;
+    if (now - lastPollMs < kBackoffMs[backoffIdx]) return;
     lastPollMs = now;
 
     if (ytmd_ip.length() == 0 || ytmd_token.length() == 0) return;
@@ -1687,7 +1785,9 @@ static void maybePollYtmdArtFallback() {
         HTTPClient http;
         http.begin(url);
         http.addHeader("Authorization", auth);
-        http.setTimeout(2500);
+        // Short timeout: local network requests should respond in <500ms.
+        // Long timeout (2500ms) on the UI task blocks LVGL and freezes touch.
+        http.setTimeout(600);
         int code = http.GET();
         Serial.printf("[YTMD/FB] GET %s -> HTTP %d\n", url, code);
 
@@ -1696,6 +1796,8 @@ static void maybePollYtmdArtFallback() {
             continue;
         }
         if (code != 200) {
+            // Connection failure (HTTP -1) or unexpected error — increment backoff
+            consecutiveFailures++;
             http.end();
             break;
         }
@@ -1703,7 +1805,19 @@ static void maybePollYtmdArtFallback() {
         String resp = http.getString();
         http.end();
 
-        StaticJsonDocument<512> filter;
+        // Debug: print raw JSON once so we can verify field names
+        static bool jsonLogged = false;
+        if (!jsonLogged) {
+            Serial.printf("[YTMD/FB] RAW JSON (first 600): %.600s\n", resp.c_str());
+            jsonLogged = true;
+        }
+
+        // Filter: must include every field we intend to read.
+        // pear-desktop structure: { track:{title,author,cover,duration}, player:{isPaused,
+        //   seekbarCurrentPosition,repeatType,queue:{shuffleEnabled}} }
+        // 1024 bytes is enough for this many filter entries.
+        StaticJsonDocument<1024> filter;
+        // Art URL candidates
         filter["cover"] = true;
         filter["imageSrc"] = true;
         filter["thumbnails"][0]["url"] = true;
@@ -1711,6 +1825,28 @@ static void maybePollYtmdArtFallback() {
         filter["thumbnail"]["thumbnails"][0]["url"] = true;
         filter["track"]["cover"] = true;
         filter["track"]["thumbnail"]["thumbnails"][0]["url"] = true;
+        // pear-desktop track fields (author OR artist depending on version)
+        filter["track"]["title"] = true;
+        filter["track"]["author"] = true;
+        filter["track"]["artist"] = true;   // alt field name
+        filter["track"]["duration"] = true; // may be seconds or ms — handled below
+        // pear-desktop player object
+        filter["player"]["isPaused"] = true;
+        filter["player"]["seekbarCurrentPosition"] = true;
+        filter["player"]["seekbarCurrentPositionHuman"] = true; // "M:SS" string
+        filter["player"]["statePercent"] = true;   // 0.0-1.0 fraction fallback
+        filter["player"]["repeatType"] = true;
+        filter["player"]["queue"]["shuffleEnabled"] = true;
+        filter["player"]["queue"]["isShuffleEnabled"] = true;
+        // Flat / legacy fallbacks
+        filter["title"] = true;
+        filter["author"] = true;
+        filter["artist"] = true;
+        filter["isPaused"] = true;
+        filter["elapsedSeconds"] = true;
+        filter["songDuration"] = true;
+        filter["repeatMode"] = true;
+        filter["shuffleMode"] = true;
 
         DynamicJsonDocument doc(4096);
         DeserializationError err = deserializeJson(
@@ -1724,9 +1860,152 @@ static void maybePollYtmdArtFallback() {
             continue;
         }
 
-        String art = extractYtmdArtUrl(doc.as<JsonVariantConst>());
+        // pear-desktop uses { track:{...}, player:{...} }
+        // Fall back to flat layout for legacy / other API versions.
+        JsonVariantConst root       = doc.as<JsonVariantConst>();
+        JsonVariantConst trackObj   = root["track"];   // may be null
+        JsonVariantConst playerObj  = root["player"];  // may be null
+
+        // Log parsed field availability once to help diagnose field-name mismatches
+        static bool metaLogged = false;
+        if (!metaLogged) {
+            Serial.printf("[YTMD/FB] track.isNull=%d player.isNull=%d\n",
+                          (int)trackObj.isNull(), (int)playerObj.isNull());
+            if (!trackObj.isNull()) {
+                Serial.printf("[YTMD/FB] track.title=%s track.author=%s track.duration=%.0f\n",
+                    trackObj["title"] | "?", trackObj["author"] | "?",
+                    trackObj["duration"] | 0.0f);
+            }
+            if (!playerObj.isNull()) {
+                Serial.printf("[YTMD/FB] player.isPaused=%d player.seek=%.1f player.repeat=%s\n",
+                    (int)(playerObj["isPaused"] | -1),
+                    playerObj["seekbarCurrentPosition"] | 0.0f,
+                    playerObj["repeatType"] | "?");
+            }
+            metaLogged = true;
+        }
+
+        // --- Update track metadata on UI ---
+        // Title: prefer track.title, then flat title
+        const char* title = (!trackObj.isNull() ? trackObj["title"].as<const char*>() : nullptr);
+        if (!title) title = root["title"] | (const char*)nullptr;
+        if (title && strlen(title) > 0) {
+            String t(title);
+            if (t != ui_title) {
+                lv_label_set_text(lbl_title, t.c_str());
+                ui_title = t;
+            }
+        } else if (ui_title.length() == 0) {
+            lv_label_set_text(lbl_title, "Not Playing");
+        }
+
+        // Artist: check both "author" and "artist" (pear-desktop uses "author" in track object)
+        const char* author = nullptr;
+        if (!trackObj.isNull()) {
+            author = trackObj["author"].as<const char*>();
+            if (!author || author[0] == '\0') author = trackObj["artist"].as<const char*>();
+        }
+        if (!author || author[0] == '\0') author = root["author"] | root["artist"] | (const char*)nullptr;
+        if (author && author[0] != '\0') {
+            String a(author);
+            if (a != ui_artist) {
+                lv_label_set_text(lbl_artist, a.c_str());
+                ui_artist = a;
+            }
+        }
+
+        // Duration: track.duration can be in seconds or ms depending on pear-desktop version.
+        // Heuristic: values > 3600 are almost certainly milliseconds (> 1 hour in seconds is rare).
+        float rawDur = (!trackObj.isNull()) ? (trackObj["duration"] | 0.0f) : 0.0f;
+        float songDurationSec = (rawDur > 3600.0f) ? (rawDur / 1000.0f)
+                              : (rawDur > 0.0f)    ? rawDur
+                              : (root["songDuration"] | 0.0f);
+
+        // Elapsed: player.seekbarCurrentPosition (seconds in pear-desktop).
+        // If the value exceeds songDuration * 10, assume it's in milliseconds.
+        float rawElapsed = 0.0f;
+        if (!playerObj.isNull()) {
+            rawElapsed = playerObj["seekbarCurrentPosition"] | 0.0f;
+            if (rawElapsed == 0.0f) {
+                // Fallback: statePercent * duration
+                float pct = playerObj["statePercent"] | 0.0f;
+                if (pct > 0.0f && songDurationSec > 0.0f) rawElapsed = pct * songDurationSec;
+            }
+        }
+        if (rawElapsed == 0.0f) rawElapsed = root["elapsedSeconds"] | 0.0f;
+        // Unit sanity: if elapsed >> duration, it's probably in ms
+        float elapsedSec = (songDurationSec > 0.0f && rawElapsed > songDurationSec * 10.0f)
+                         ? rawElapsed / 1000.0f
+                         : rawElapsed;
+
+        int durSec  = (int)songDurationSec;
+        if (durSec > 0) {
+            ytmd_duration_seconds = durSec;
+            s_ytmd_dur_sec     = durSec;
+            s_ytmd_elapsed_sec = elapsedSec;
+            s_ytmd_pos_ts      = millis();
+            // Note: time labels and slider are updated by updateYtmdProgressInterp()
+            // which is called every second from updateUI(). No direct label update here.
+        }
+
+        // Play/Pause: player.isPaused (pear-desktop) or flat isPaused
+        bool isPaused = (!playerObj.isNull()) ? (playerObj["isPaused"] | true)
+                      : (root["isPaused"] | true);
+        bool isPlaying = !isPaused;
+        if (isPlaying != ui_playing) {
+            lv_obj_t* lbl = lv_obj_get_child(btn_play, 0);
+            lv_label_set_text(lbl, isPlaying ? MDI_PAUSE : MDI_PLAY);
+            lv_obj_set_style_text_font(lbl, &lv_font_mdi_40, 0);
+            lv_obj_center(lbl);
+            ui_playing = isPlaying;
+        }
+        s_ytmd_is_playing = isPlaying;
+
+        // Shuffle: player.queue.shuffleEnabled / isShuffleEnabled (pear-desktop), or flat shuffleMode
+        bool shuffle = false;
+        if (!playerObj.isNull()) {
+            JsonVariantConst q = playerObj["queue"];
+            if (!q.isNull()) {
+                shuffle = q["shuffleEnabled"] | q["isShuffleEnabled"] | false;
+            }
+        } else {
+            shuffle = root["shuffleMode"] | false;
+        }
+        if (shuffle != ui_shuffle) {
+            lv_obj_t* lbl = lv_obj_get_child(btn_shuffle, 0);
+            lv_obj_set_style_text_color(lbl, shuffle ? COL_ACCENT : COL_TEXT2, 0);
+            ui_shuffle = shuffle;
+        }
+
+        // Repeat: player.repeatType (pear-desktop: "NONE","ONE","ALL") or flat repeatMode
+        const char* repeatMode = (!playerObj.isNull()) ? (playerObj["repeatType"] | (const char*)nullptr)
+                               : (root["repeatMode"] | (const char*)nullptr);
+        if (repeatMode) {
+            String rm(repeatMode);
+            if (rm != ui_repeat) {
+                lv_obj_t* lbl = lv_obj_get_child(btn_repeat, 0);
+                if (rm == "ONE") {
+                    lv_label_set_text(lbl, MDI_REPEAT_ONCE);
+                    lv_obj_set_style_text_font(lbl, &lv_font_mdi_32, 0);
+                    lv_obj_set_style_text_color(lbl, COL_ACCENT, 0);
+                } else if (rm == "ALL") {
+                    lv_label_set_text(lbl, MDI_REPEAT);
+                    lv_obj_set_style_text_font(lbl, &lv_font_mdi_32, 0);
+                    lv_obj_set_style_text_color(lbl, COL_ACCENT, 0);
+                } else {
+                    lv_label_set_text(lbl, MDI_REPEAT);
+                    lv_obj_set_style_text_font(lbl, &lv_font_mdi_32, 0);
+                    lv_obj_set_style_text_color(lbl, COL_TEXT2, 0);
+                }
+                ui_repeat = rm;
+            }
+        }
+
+        // Album art
+        String art = extractYtmdArtUrl(root);
         if (art.length() > 0) {
             gotArt = true;
+            consecutiveFailures = 0;  // Reset backoff on success
             if (art != lastRequestedYtmdArt) {
                 Serial.printf("[YTMD/FB] Requesting art: %s\n", art.c_str());
                 requestAlbumArt(art);
@@ -1734,14 +2013,51 @@ static void maybePollYtmdArtFallback() {
             }
             break;
         }
+
+        // Even if no art, we got a valid response — reset failure count
+        consecutiveFailures = 0;
+        gotArt = true;  // Prevent "no art" spam log when track metadata was parsed
+        break;
     }
 
     if (!gotArt && (now - noDeviceLogGate > 10000)) {
-        Serial.println("[YTMD/FB] No art URL available from pear endpoints yet");
+        Serial.printf("[YTMD/FB] No art URL available from pear endpoints yet (failures=%d)\n",
+                      consecutiveFailures);
         noDeviceLogGate = now;
     }
 
     xSemaphoreGive(network_mutex);
+}
+
+// Interpolates YTMD playback position every second between 3-second polls.
+// Reads from s_ytmd_* statics written by maybePollYtmdArtFallback().
+static void updateYtmdProgressInterp() {
+    if (s_ytmd_dur_sec <= 0 || s_ytmd_pos_ts == 0) return;
+    static unsigned long lastUpdateMs = 0;
+    unsigned long now = millis();
+    if (now - lastUpdateMs < 1000) return;
+    lastUpdateMs = now;
+
+    float elapsed = s_ytmd_elapsed_sec;
+    if (s_ytmd_is_playing) elapsed += (now - s_ytmd_pos_ts) / 1000.0f;
+    if (elapsed > s_ytmd_dur_sec) elapsed = (float)s_ytmd_dur_sec;
+
+    int elapSec = (int)elapsed;
+    int durSec  = s_ytmd_dur_sec;
+
+    char tbuf[12];
+    snprintf(tbuf, sizeof(tbuf), "%d:%02d", elapSec / 60, elapSec % 60);
+    lv_label_set_text(lbl_time, tbuf);
+
+    int rem = durSec - elapSec;
+    if (rem < 0) rem = 0;
+    char rbuf[12];
+    snprintf(rbuf, sizeof(rbuf), "-%d:%02d", rem / 60, rem % 60);
+    lv_label_set_text(lbl_time_remaining, rbuf);
+
+    if (!dragging_prog) {
+        lv_slider_set_value(slider_progress, (elapSec * 100) / durSec, LV_ANIM_OFF);
+    }
 }
 
 // Selects the correct art URL and calls requestAlbumArt() when needed.
@@ -1935,12 +2251,21 @@ static void updateAlbumArtRequest(SonosDevice* d) {
 // UI Update Function
 // ============================================================================
 void updateUI() {
+    static bool ytmd_header_set = false;
     SonosDevice* d = sonos.getCurrentDevice();
     if (!d || isYtmdVirtualDevice(d)) {
+        // Ensure device name shows "YTMD" in YTMD-only mode
+        if (!ytmd_header_set && lbl_device_name) {
+            lv_label_set_text(lbl_device_name, "YTMD");
+            ytmd_header_set = true;
+        }
         maybePollYtmdArtFallback();
+        updateYtmdProgressInterp();
         displayCompletedArt();
         return;
     }
+    // Reset flag so if user switches to Sonos mode it updates again
+    ytmd_header_set = false;
 
     if (!updateConnectionState(d)) return;
 
@@ -2119,7 +2444,7 @@ void processUpdates() {
     if (need && (millis() - lastUpdate > 200)) { updateUI(); lastUpdate = millis(); }
     else {
         SonosDevice* d = sonos.getCurrentDevice();
-        if (!d || isYtmdVirtualDevice(d)) maybePollYtmdArtFallback();
+        if (!d || isYtmdVirtualDevice(d)) { maybePollYtmdArtFallback(); updateYtmdProgressInterp(); }
         displayCompletedArt();  // Run even without Sonos events (e.g. art ready while polling suppressed)
     }
     // Auto-refresh queue list if the queue screen is visible when new data arrives

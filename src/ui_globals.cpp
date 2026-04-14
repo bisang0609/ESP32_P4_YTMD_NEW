@@ -264,6 +264,8 @@ int    ytmd_port      = YTMD_DEFAULT_PORT;
 String ytmd_auth_code = "";
 String ytmd_token     = "";    // pear-desktop Bearer access token (saved to NVS)
 lv_obj_t* lbl_ytmd_status = nullptr;
+// Track duration (seconds) from last /api/v1/song poll — used for seek calculation
+int ytmd_duration_seconds = 0;
 
 // ============================================================================
 // OTA Update State

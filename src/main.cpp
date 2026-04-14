@@ -198,17 +198,17 @@ void setup() {
     setBrightness(brightness_level);
     Serial.printf("[DISPLAY] Initial brightness: %d%%\n", brightness_level);
 
-    // Show boot screen with Sonos logo
+    // Show boot screen with YTMD title
     lv_obj_t* boot_scr = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(boot_scr, lv_color_hex(0x000000), 0);
     lv_screen_load(boot_scr);
 
-    // Sonos logo (scale down significantly)
-    lv_obj_t* img_logo = lv_image_create(boot_scr);
-    lv_image_set_src(img_logo, &Sonos_idnu60bqes_1);
-    lv_obj_align(img_logo, LV_ALIGN_CENTER, 0, -30);
-    // Scale down significantly (256 = 100%, so 80 = ~31% size, 100 = ~39% size)
-    lv_image_set_scale(img_logo, 130);  // Smaller - about 25% of original size
+    // YTMD title text
+    lv_obj_t* lbl_boot_title = lv_label_create(boot_scr);
+    lv_label_set_text(lbl_boot_title, "YTMD");
+    lv_obj_set_style_text_color(lbl_boot_title, lv_color_hex(0xD4A84B), 0);
+    lv_obj_set_style_text_font(lbl_boot_title, &lv_font_montserrat_48, 0);
+    lv_obj_align(lbl_boot_title, LV_ALIGN_CENTER, 0, -30);
 
     // Create animated progress bar below logo
     lv_obj_t* boot_bar = lv_bar_create(boot_scr);
