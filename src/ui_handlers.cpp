@@ -452,6 +452,114 @@ static int ytmdApiPostWithFallback(const char* primaryPath,
     return code;
 }
 
+static void applyYtmdPlayState(bool isPlaying) {
+    if (btn_play) {
+        lv_obj_t* lbl = lv_obj_get_child(btn_play, 0);
+        if (lbl) {
+            lv_label_set_text(lbl, isPlaying ? MDI_PAUSE : MDI_PLAY);
+            lv_obj_set_style_text_font(lbl, &lv_font_mdi_40, 0);
+            lv_obj_center(lbl);
+        }
+    }
+    ui_playing = isPlaying;
+    s_ytmd_is_playing = isPlaying;
+    if (isPlaying) s_ytmd_pos_ts = millis();
+}
+
+static void applyYtmdMuteState(bool muted) {
+    if (btn_mute) {
+        lv_obj_t* lbl = lv_obj_get_child(btn_mute, 0);
+        if (lbl) lv_label_set_text(lbl, muted ? MDI_VOLUME_OFF : MDI_VOLUME_HIGH);
+    }
+    ui_muted = muted;
+}
+
+static void applyYtmdShuffleState(bool shuffle) {
+    if (btn_shuffle) {
+        lv_obj_t* lbl = lv_obj_get_child(btn_shuffle, 0);
+        if (lbl) lv_obj_set_style_text_color(lbl, shuffle ? COL_ACCENT : COL_TEXT2, 0);
+    }
+    ui_shuffle = shuffle;
+}
+
+static void applyYtmdRepeatMode(const String& rm) {
+    if (btn_repeat) {
+        lv_obj_t* lbl = lv_obj_get_child(btn_repeat, 0);
+        if (lbl) {
+            if (rm == "ONE") {
+                lv_label_set_text(lbl, MDI_REPEAT_ONCE);
+                lv_obj_set_style_text_font(lbl, &lv_font_mdi_32, 0);
+                lv_obj_set_style_text_color(lbl, COL_ACCENT, 0);
+            } else if (rm == "ALL") {
+                lv_label_set_text(lbl, MDI_REPEAT);
+                lv_obj_set_style_text_font(lbl, &lv_font_mdi_32, 0);
+                lv_obj_set_style_text_color(lbl, COL_ACCENT, 0);
+            } else {
+                lv_label_set_text(lbl, MDI_REPEAT);
+                lv_obj_set_style_text_font(lbl, &lv_font_mdi_32, 0);
+                lv_obj_set_style_text_color(lbl, COL_TEXT2, 0);
+            }
+        }
+    }
+    ui_repeat = rm;
+}
+
+static String nextRepeatMode(const String& current) {
+    if (current == "NONE") return "ALL";
+    if (current == "ALL") return "ONE";
+    return "NONE";
+}
+
+// Polls lightweight control-state endpoints so icons stay in sync even when
+// /song payload omits queue/repeat fields.
+static void pollAndApplyYtmdControlStates(const char* authHeader) {
+    if (!authHeader || !authHeader[0]) return;
+
+    auto getJson = [&](const char* path, String* outResp) -> bool {
+        if (!path || !outResp) return false;
+        char url[192];
+        snprintf(url, sizeof(url), "http://%s:%d%s",
+                 ytmd_ip.c_str(),
+                 (ytmd_port > 0 ? ytmd_port : YTMD_DEFAULT_PORT),
+                 path);
+        HTTPClient http;
+        http.begin(url);
+        http.addHeader("Authorization", authHeader);
+        http.setTimeout(450);
+        int code = http.GET();
+        if (code != 200) {
+            http.end();
+            return false;
+        }
+        *outResp = http.getString();
+        http.end();
+        return true;
+    };
+
+    String shuffleResp;
+    if (getJson("/api/v1/shuffle", &shuffleResp)) {
+        DynamicJsonDocument doc(128);
+        if (!deserializeJson(doc, shuffleResp)) {
+            JsonVariantConst root = doc.as<JsonVariantConst>();
+            bool shuffle = parseJsonBoolFlexible(root["state"], ui_shuffle);
+            if (shuffle != ui_shuffle) applyYtmdShuffleState(shuffle);
+        }
+    }
+
+    String repeatResp;
+    if (getJson("/api/v1/repeat-mode", &repeatResp)) {
+        DynamicJsonDocument doc(128);
+        if (!deserializeJson(doc, repeatResp)) {
+            JsonVariantConst root = doc.as<JsonVariantConst>();
+            const char* mode = root["mode"] | (const char*)nullptr;
+            if (mode && mode[0]) {
+                String rm(mode);
+                if (rm != ui_repeat) applyYtmdRepeatMode(rm);
+            }
+        }
+    }
+}
+
 // ============================================================================
 // Playback Event Handlers
 // ============================================================================
@@ -459,8 +567,11 @@ void ev_play(lv_event_t* e) {
     if (isYtmdMode()) {
         // Newer pear-desktop: /toggle-play
         // Older builds may expose /play-pause.
-        ytmdApiPostWithFallback("/api/v1/toggle-play", nullptr,
-                                "/api/v1/play-pause", nullptr);
+        int code = ytmdApiPostWithFallback("/api/v1/toggle-play", nullptr,
+                                           "/api/v1/play-pause", nullptr);
+        if (code >= 200 && code < 300) {
+            applyYtmdPlayState(!ui_playing);  // optimistic
+        }
         return;
     }
     SonosDevice* d = sonos.getCurrentDevice();
@@ -485,7 +596,10 @@ void ev_next(lv_event_t* e) {
 
 void ev_shuffle(lv_event_t* e) {
     if (isYtmdMode()) {
-        ytmdApiPost("/api/v1/shuffle", "{}");
+        int code = ytmdApiPost("/api/v1/shuffle", "{}");
+        if (code >= 200 && code < 300) {
+            applyYtmdShuffleState(!ui_shuffle);  // optimistic
+        }
         return;
     }
     SonosDevice* d = sonos.getCurrentDevice();
@@ -496,8 +610,11 @@ void ev_repeat(lv_event_t* e) {
     if (isYtmdMode()) {
         // Newer pear-desktop: POST /switch-repeat with {"iteration":1}
         // Older builds may expose POST /repeat-mode.
-        ytmdApiPostWithFallback("/api/v1/switch-repeat", "{\"iteration\":1}",
-                                "/api/v1/repeat-mode", "{}");
+        int code = ytmdApiPostWithFallback("/api/v1/switch-repeat", "{\"iteration\":1}",
+                                           "/api/v1/repeat-mode", "{}");
+        if (code >= 200 && code < 300) {
+            applyYtmdRepeatMode(nextRepeatMode(ui_repeat));  // optimistic
+        }
         return;
     }
     SonosDevice* d = sonos.getCurrentDevice();
@@ -569,8 +686,11 @@ void ev_vol_slider(lv_event_t* e) {
 void ev_mute(lv_event_t* e) {
     if (isYtmdMode()) {
         // pear-desktop API: POST /toggle-mute
-        ytmdApiPostWithFallback("/api/v1/toggle-mute", nullptr,
-                                "/api/v1/mute-unmute", nullptr);
+        int code = ytmdApiPostWithFallback("/api/v1/toggle-mute", nullptr,
+                                           "/api/v1/mute-unmute", nullptr);
+        if (code >= 200 && code < 300) {
+            applyYtmdMuteState(!ui_muted);  // optimistic
+        }
         return;
     }
     SonosDevice* d = sonos.getCurrentDevice();
@@ -2139,6 +2259,7 @@ static bool isYtmdVirtualDevice(const SonosDevice* d) {
 static void maybePollYtmdArtFallback() {
     static unsigned long lastPollMs = 0;
     static unsigned long lastVolPollMs = 0;
+    static unsigned long lastCtlPollMs = 0;
     static String lastRequestedYtmdArt = "";
     static String lastProgressTrackKey = "";
     static uint32_t noDeviceLogGate = 0;
@@ -2151,6 +2272,7 @@ static void maybePollYtmdArtFallback() {
     // Backoff intervals (ms): 3s, 10s, 30s, 60s — caps at 60s after 4+ failures
     static const uint32_t kBackoffMs[] = {3000, 10000, 30000, 60000};
     static const uint32_t kVolumePollMs = 1200;
+    static const uint32_t kControlPollMs = 1500;
 
     const uint32_t now = millis();
 
@@ -2182,10 +2304,19 @@ static void maybePollYtmdArtFallback() {
 
     // Refresh volume independently from /song backoff.
     if (now - lastVolPollMs >= kVolumePollMs) {
-        if (network_mutex && xSemaphoreTake(network_mutex, pdMS_TO_TICKS(80)) == pdTRUE) {
+        if (network_mutex && xSemaphoreTake(network_mutex, pdMS_TO_TICKS(180)) == pdTRUE) {
             pollAndApplyYtmdVolumeState(auth);
             xSemaphoreGive(network_mutex);
             lastVolPollMs = now;
+        }
+    }
+
+    // Refresh shuffle/repeat UI independently from /song payload shape/backoff.
+    if (now - lastCtlPollMs >= kControlPollMs) {
+        if (network_mutex && xSemaphoreTake(network_mutex, pdMS_TO_TICKS(220)) == pdTRUE) {
+            pollAndApplyYtmdControlStates(auth);
+            xSemaphoreGive(network_mutex);
+            lastCtlPollMs = now;
         }
     }
 
@@ -2481,52 +2612,38 @@ static void maybePollYtmdArtFallback() {
         }
 
         if (isPlaying != ui_playing) {
-            lv_obj_t* lbl = lv_obj_get_child(btn_play, 0);
-            lv_label_set_text(lbl, isPlaying ? MDI_PAUSE : MDI_PLAY);
-            lv_obj_set_style_text_font(lbl, &lv_font_mdi_40, 0);
-            lv_obj_center(lbl);
-            ui_playing = isPlaying;
+            applyYtmdPlayState(isPlaying);
+        } else {
+            s_ytmd_is_playing = isPlaying;
         }
-        s_ytmd_is_playing = isPlaying;
 
-        // Shuffle: player.queue.shuffleEnabled / isShuffleEnabled (pear-desktop), or flat shuffleMode
-        bool shuffle = false;
+        // Shuffle: player.queue.shuffleEnabled / isShuffleEnabled (pear-desktop), with flat fallback.
+        bool shuffle = ui_shuffle;
+        bool hasShuffle = false;
         if (!playerObj.isNull()) {
             JsonVariantConst q = playerObj["queue"];
             if (!q.isNull()) {
-                shuffle = q["shuffleEnabled"] | q["isShuffleEnabled"] | false;
+                if (!q["shuffleEnabled"].isNull()) {
+                    shuffle = parseJsonBoolFlexible(q["shuffleEnabled"], shuffle);
+                    hasShuffle = true;
+                } else if (!q["isShuffleEnabled"].isNull()) {
+                    shuffle = parseJsonBoolFlexible(q["isShuffleEnabled"], shuffle);
+                    hasShuffle = true;
+                }
             }
-        } else {
+        }
+        if (!hasShuffle) {
             shuffle = root["shuffleMode"] | false;
         }
-        if (shuffle != ui_shuffle) {
-            lv_obj_t* lbl = lv_obj_get_child(btn_shuffle, 0);
-            lv_obj_set_style_text_color(lbl, shuffle ? COL_ACCENT : COL_TEXT2, 0);
-            ui_shuffle = shuffle;
-        }
+        if (shuffle != ui_shuffle) applyYtmdShuffleState(shuffle);
 
-        // Repeat: player.repeatType (pear-desktop: "NONE","ONE","ALL") or flat repeatMode
-        const char* repeatMode = (!playerObj.isNull()) ? (playerObj["repeatType"] | (const char*)nullptr)
-                               : (root["repeatMode"] | (const char*)nullptr);
+        // Repeat: player.repeatType (pear-desktop: "NONE","ONE","ALL"), with flat fallback.
+        const char* repeatMode = nullptr;
+        if (!playerObj.isNull()) repeatMode = playerObj["repeatType"] | (const char*)nullptr;
+        if (!repeatMode) repeatMode = root["repeatMode"] | (const char*)nullptr;
         if (repeatMode) {
             String rm(repeatMode);
-            if (rm != ui_repeat) {
-                lv_obj_t* lbl = lv_obj_get_child(btn_repeat, 0);
-                if (rm == "ONE") {
-                    lv_label_set_text(lbl, MDI_REPEAT_ONCE);
-                    lv_obj_set_style_text_font(lbl, &lv_font_mdi_32, 0);
-                    lv_obj_set_style_text_color(lbl, COL_ACCENT, 0);
-                } else if (rm == "ALL") {
-                    lv_label_set_text(lbl, MDI_REPEAT);
-                    lv_obj_set_style_text_font(lbl, &lv_font_mdi_32, 0);
-                    lv_obj_set_style_text_color(lbl, COL_ACCENT, 0);
-                } else {
-                    lv_label_set_text(lbl, MDI_REPEAT);
-                    lv_obj_set_style_text_font(lbl, &lv_font_mdi_32, 0);
-                    lv_obj_set_style_text_color(lbl, COL_TEXT2, 0);
-                }
-                ui_repeat = rm;
-            }
+            if (rm != ui_repeat) applyYtmdRepeatMode(rm);
         }
 
         // Album art
