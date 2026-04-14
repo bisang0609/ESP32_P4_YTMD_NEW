@@ -5,6 +5,7 @@
 .vscode/launch.json
 .vscode/ipch
 
+
 # Private files (DO NOT COMMIT)
 INSTRUCTIONS.md
 OTA_FEATURE_SUMMARY.md
@@ -21,3 +22,4 @@ node_modules/
 *.map
 WORKFLOW.md
 ARCHITECTURE.md
+.tmp_ref
