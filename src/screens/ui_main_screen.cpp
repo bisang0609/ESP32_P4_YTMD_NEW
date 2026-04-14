@@ -6,6 +6,7 @@
 #include "ui_common.h"
 #include "lyrics.h"
 #include "ui_icons.h"
+#include "ui_metadata_font.h"
 
 // ==================== MAIN SCREEN - CLEAN SIMPLE DESIGN ====================
 void createMainScreen() {
@@ -174,7 +175,7 @@ void createMainScreen() {
     lv_label_set_long_mode(lbl_title, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_label_set_text(lbl_title, "Not Playing");
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
-    lv_obj_set_style_text_font(lbl_title, &lv_font_montserrat_32, 0);
+    lv_obj_set_style_text_font(lbl_title, &ui_font_title_chain, 0);
 
     // Artist (gray, smaller) — below title
     lbl_artist = lv_label_create(panel_right);
@@ -183,7 +184,7 @@ void createMainScreen() {
     lv_label_set_long_mode(lbl_artist, LV_LABEL_LONG_SCROLL_CIRCULAR);  // Scroll like title — shows full name
     lv_label_set_text(lbl_artist, "");
     lv_obj_set_style_text_color(lbl_artist, COL_TEXT2, 0);
-    lv_obj_set_style_text_font(lbl_artist, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(lbl_artist, &ui_font_artist_chain, 0);
 
     // Queue/Playlist button — aligned with artist row
     btn_queue = lv_btn_create(panel_right);

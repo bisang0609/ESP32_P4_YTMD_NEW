@@ -8,6 +8,8 @@
 #include "config.h"
 #include "lyrics.h"
 #include "clock_screen.h"
+#include "ui_metadata_font.h"
+#include <SPIFFS.h>
 #include <esp_flash.h>
 #include <esp_task_wdt.h>
 // Sonos logo
@@ -250,6 +252,21 @@ void setup() {
 
     // Initialize lyrics PSRAM buffer before creating screens
     initLyrics();
+
+    // Runtime metadata fonts (KR/JP) are loaded from SPIFFS.
+    // This avoids embedding huge CJK font arrays in firmware flash.
+    bool spiffs_mounted = SPIFFS.begin(false);
+    if (!spiffs_mounted) {
+        Serial.println("[SPIFFS] Mount failed; metadata runtime fonts disabled");
+        Serial.println("[SPIFFS] Upload filesystem image to restore /fonts");
+    } else {
+        Serial.println("[SPIFFS] Mounted");
+    }
+
+    const bool metadata_fonts_ok = ui_metadata_fonts_init();
+    if (!metadata_fonts_ok) {
+        Serial.println("[FONT] Runtime KR/JP font files missing; using built-in fallback");
+    }
 
     createMainScreen();
     updateBootProgress(35);

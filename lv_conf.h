@@ -166,6 +166,11 @@
 #define LV_FONT_SIMSUN_16_CJK 0
 #define LV_FONT_UNSCII_8 0
 #define LV_FONT_UNSCII_16 0
+// Built-in CJK fallback fonts (used when runtime KR/JP TTF is unavailable)
+#define LV_FONT_SOURCE_HAN_SANS_SC_14_CJK 1
+#define LV_FONT_SOURCE_HAN_SANS_SC_16_CJK 1
+// Runtime TTF metadata fonts
+#define LV_USE_TINY_TTF 1
 
 /**********************
  * TEXT SETTINGS
