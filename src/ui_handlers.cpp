@@ -64,6 +64,7 @@ static bool isYtmdMode() {
     SonosDevice* d = sonos.getCurrentDevice();
     return !d || (d->rinconID == "YTMD_VIRTUAL");
 }
+static bool isYtmdVirtualDevice(const SonosDevice* d);
 
 // Shared interpolation state — written by poll, read by updateYtmdProgressInterp()
 static float         s_ytmd_elapsed_sec  = 0.0f;
@@ -78,13 +79,24 @@ static int           s_ytmd_local_volume_target = -1;
 // successful POST /volume. Detect that pattern and stop forcing slider to max.
 static bool          s_ytmd_volume_sync_suspect = false;
 static uint8_t       s_ytmd_stuck100_hits = 0;
+// This backend currently does not expose /api/v1/queue/next.
+// Keep disabled to avoid periodic 404s; parse /api/v1/queue directly.
+static bool          s_ytmd_queue_next_supported = false;
 
 #ifndef YTMD_FB_VERBOSE_LOGS
 #define YTMD_FB_VERBOSE_LOGS 0
 #endif
 
 #ifndef YTMD_VOL_DEBUG
-#define YTMD_VOL_DEBUG 1
+#define YTMD_VOL_DEBUG 0
+#endif
+
+#ifndef YTMD_CMD_DEBUG
+#define YTMD_CMD_DEBUG 0
+#endif
+
+#ifndef YTMD_QUEUE_DEBUG
+#define YTMD_QUEUE_DEBUG 1
 #endif
 
 #if YTMD_FB_VERBOSE_LOGS
@@ -99,6 +111,20 @@ static uint8_t       s_ytmd_stuck100_hits = 0;
 #define YTMD_VOL_LOG(...) Serial.printf(__VA_ARGS__)
 #else
 #define YTMD_VOL_LOG(...) do {} while (0)
+#endif
+
+#if YTMD_CMD_DEBUG
+#define YTMD_CMD_LOG(...) Serial.printf(__VA_ARGS__)
+#else
+#define YTMD_CMD_LOG(...) do {} while (0)
+#endif
+
+#if YTMD_QUEUE_DEBUG
+#define YTMD_QUEUE_LOG(...) Serial.printf(__VA_ARGS__)
+#define YTMD_QUEUE_LOG_LN(msg) Serial.println(msg)
+#else
+#define YTMD_QUEUE_LOG(...) do {} while (0)
+#define YTMD_QUEUE_LOG_LN(msg) do {} while (0)
 #endif
 
 // Parse "M:SS" or "H:MM:SS" into seconds.
@@ -355,7 +381,7 @@ static void pollAndApplyYtmdVolumeState(const char* authHeader) {
             if (s_ytmd_stuck100_hits < 255) s_ytmd_stuck100_hits++;
             if (s_ytmd_stuck100_hits >= 3 && !s_ytmd_volume_sync_suspect) {
                 s_ytmd_volume_sync_suspect = true;
-                Serial.println("[YTMD] /volume state appears stuck at 100; suppressing forced slider sync");
+                YTMD_VOL_LOG("[YTMD/VOL] state appears stuck at 100; suppressing forced slider sync\n");
             }
         } else {
             s_ytmd_stuck100_hits = 0;
@@ -391,20 +417,20 @@ static void pollAndApplyYtmdVolumeState(const char* authHeader) {
 // Returns HTTP response code (200 = success, negative = connection error).
 static int ytmdApiPost(const char* path, const char* body = nullptr) {
     if (ytmd_ip.length() == 0 || ytmd_token.length() == 0) {
-        Serial.printf("[YTMD] POST %s skipped: missing ip/token (ip=%d token=%d)\n",
-                      path ? path : "<null>",
-                      (int)(ytmd_ip.length() > 0),
-                      (int)(ytmd_token.length() > 0));
+        YTMD_CMD_LOG("[YTMD] POST %s skipped: missing ip/token (ip=%d token=%d)\n",
+                     path ? path : "<null>",
+                     (int)(ytmd_ip.length() > 0),
+                     (int)(ytmd_token.length() > 0));
         return -1;
     }
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.printf("[YTMD] POST %s skipped: wifi disconnected (status=%d)\n",
-                      path ? path : "<null>", (int)WiFi.status());
+        YTMD_CMD_LOG("[YTMD] POST %s skipped: wifi disconnected (status=%d)\n",
+                     path ? path : "<null>", (int)WiFi.status());
         return -1;
     }
 
     if (!network_mutex || xSemaphoreTake(network_mutex, pdMS_TO_TICKS(700)) != pdTRUE) {
-        Serial.printf("[YTMD] POST %s skipped: network mutex busy\n", path ? path : "<null>");
+        YTMD_CMD_LOG("[YTMD] POST %s skipped: network mutex busy\n", path ? path : "<null>");
         return -1;
     }
 
@@ -431,7 +457,7 @@ static int ytmdApiPost(const char* path, const char* body = nullptr) {
     http.end();
     xSemaphoreGive(network_mutex);
 
-    Serial.printf("[YTMD] POST %s -> HTTP %d\n", path, code);
+    YTMD_CMD_LOG("[YTMD] POST %s -> HTTP %d\n", path, code);
     return code;
 }
 
@@ -443,10 +469,10 @@ static int ytmdApiPostWithFallback(const char* primaryPath,
                                    const char* fallbackBody = nullptr) {
     int code = ytmdApiPost(primaryPath, primaryBody);
     if ((code == 404 || code == 405) && fallbackPath && fallbackPath[0]) {
-        Serial.printf("[YTMD] Fallback POST %s -> %s (prev HTTP %d)\n",
-                      primaryPath ? primaryPath : "<null>",
-                      fallbackPath,
-                      code);
+        YTMD_CMD_LOG("[YTMD] Fallback POST %s -> %s (prev HTTP %d)\n",
+                     primaryPath ? primaryPath : "<null>",
+                     fallbackPath,
+                     code);
         return ytmdApiPost(fallbackPath, fallbackBody);
     }
     return code;
@@ -502,6 +528,205 @@ static void applyYtmdRepeatMode(const String& rm) {
         }
     }
     ui_repeat = rm;
+}
+
+static String ytmdExtractText(JsonVariantConst v) {
+    if (v.isNull()) return "";
+    if (v.is<const char*>()) {
+        const char* s = v.as<const char*>();
+        return (s && s[0]) ? String(s) : String("");
+    }
+    if (v.is<JsonObjectConst>()) {
+        JsonVariantConst o = v;
+        const char* s = o["text"] | (const char*)nullptr;
+        if (s && s[0]) return String(s);
+        const char* r0 = o["runs"][0]["text"] | (const char*)nullptr;
+        if (r0 && r0[0]) return String(r0);
+    }
+    return "";
+}
+
+static void applyYtmdNextTrackLine(const String& line) {
+    if (lbl_next_header) lv_obj_clear_flag(lbl_next_header, LV_OBJ_FLAG_HIDDEN);
+    if (lbl_next_title) {
+        lv_label_set_text(lbl_next_title, line.c_str());
+        if (line.length() > 0) lv_obj_clear_flag(lbl_next_title, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(lbl_next_title, LV_OBJ_FLAG_HIDDEN);
+    }
+    // In YTMD mode show single-line "title - artist" only.
+    if (lbl_next_artist) lv_obj_add_flag(lbl_next_artist, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Called from YTMD polling path while network_mutex is already held by caller.
+// Returns true when queue data was successfully fetched/parsing completed.
+static bool pollAndApplyYtmdNextTrack(const char* authHeader) {
+    if (!authHeader || !authHeader[0]) return false;
+
+    auto httpGet = [&](const char* path, String* outResp, int* outCode) -> bool {
+        if (!path || !outResp || !outCode) return false;
+        char url[192];
+        snprintf(url, sizeof(url), "http://%s:%d%s",
+                 ytmd_ip.c_str(),
+                 (ytmd_port > 0 ? ytmd_port : YTMD_DEFAULT_PORT),
+                 path);
+        HTTPClient http;
+        http.begin(url);
+        http.addHeader("Authorization", authHeader);
+        // Queue endpoints can be heavier than /song; keep timeout moderate.
+        // Keep short to avoid UI stutter on slow/no response.
+        http.setTimeout(350);
+        int code = http.GET();
+        *outCode = code;
+        if (code != 200) {
+            http.end();
+            return false;
+        }
+        *outResp = http.getString();
+        http.end();
+        return true;
+    };
+
+    // Fast path: if backend supports /queue/next, use it.
+    if (s_ytmd_queue_next_supported) {
+        String resp;
+        int code = 0;
+        if (httpGet("/api/v1/queue/next", &resp, &code)) {
+            DynamicJsonDocument doc(1024);
+            if (!deserializeJson(doc, resp)) {
+                JsonVariantConst root = doc.as<JsonVariantConst>();
+                String title = ytmdExtractText(root["title"]);
+                String artist = ytmdExtractText(root["shortBylineText"]);
+                if (artist.length() == 0) artist = ytmdExtractText(root["author"]);
+                if (artist.length() == 0) artist = ytmdExtractText(root["artist"]);
+                String line = title;
+                if (artist.length() > 0) {
+                    if (line.length() > 0) line += " - ";
+                    line += artist;
+                }
+                applyYtmdNextTrackLine(line);
+                return true;
+            }
+        } else if (code == 404 || code == 405) {
+            s_ytmd_queue_next_supported = false;
+            YTMD_QUEUE_LOG_LN("[YTMD/QUEUE] /queue/next not supported; fallback to /queue");
+        } else if (code == 204) {
+            applyYtmdNextTrackLine("");
+            return true;
+        }
+    }
+
+    // Fallback path: parse /queue items and find selected+1.
+    String resp;
+    int code = 0;
+    if (!httpGet("/api/v1/queue", &resp, &code)) return false;
+
+    StaticJsonDocument<768> filter;
+    filter["items"][0]["playlistPanelVideoRenderer"]["selected"] = true;
+    filter["items"][0]["playlistPanelVideoRenderer"]["title"]["runs"][0]["text"] = true;
+    filter["items"][0]["playlistPanelVideoRenderer"]["shortBylineText"]["runs"][0]["text"] = true;
+    filter["items"][0]["playlistPanelVideoWrapperRenderer"]["primaryRenderer"]["playlistPanelVideoRenderer"]["selected"] = true;
+    filter["items"][0]["playlistPanelVideoWrapperRenderer"]["primaryRenderer"]["playlistPanelVideoRenderer"]["title"]["runs"][0]["text"] = true;
+    filter["items"][0]["playlistPanelVideoWrapperRenderer"]["primaryRenderer"]["playlistPanelVideoRenderer"]["shortBylineText"]["runs"][0]["text"] = true;
+
+    DynamicJsonDocument doc(12288);
+    DeserializationError err = deserializeJson(
+        doc,
+        resp,
+        DeserializationOption::Filter(filter),
+        DeserializationOption::NestingLimit(64)
+    );
+    if (err) {
+        YTMD_QUEUE_LOG("[YTMD/QUEUE] /queue parse error: %s\n", err.c_str());
+        return false;
+    }
+
+    JsonArrayConst items = doc["items"].as<JsonArrayConst>();
+    if (items.isNull() || items.size() == 0) {
+        applyYtmdNextTrackLine("");
+        return true;
+    }
+
+    auto getRenderer = [&](JsonObjectConst item) -> JsonVariantConst {
+        JsonVariantConst r = item["playlistPanelVideoRenderer"];
+        if (r.isNull()) r = item["playlistPanelVideoWrapperRenderer"]["primaryRenderer"]["playlistPanelVideoRenderer"];
+        return r;
+    };
+
+    int selectedPos = -1;
+    for (int i = 0; i < (int)items.size(); ++i) {
+        JsonObjectConst item = items[i].as<JsonObjectConst>();
+        if (item.isNull()) continue;
+        JsonVariantConst r = getRenderer(item);
+        if (r.isNull()) continue;
+        if (parseJsonBoolFlexible(r["selected"], false)) {
+            selectedPos = i;
+            break;
+        }
+    }
+
+    // Sync YTMD queue into the existing SonosDevice cache so Playlist UI can
+    // render from memory (same pattern as native Sonos flow).
+    SonosDevice* dev = sonos.getCurrentDevice();
+    if (dev && isYtmdVirtualDevice(dev)) {
+        const int maxItems = (int)min((size_t)QUEUE_ITEMS_MAX, items.size());
+        dev->queueSize = 0;
+        dev->totalTracks = (int)items.size();
+        if (selectedPos >= 0) {
+            dev->currentTrackNumber = selectedPos + 1;  // 1-based
+        }
+        for (int i = 0; i < maxItems; ++i) {
+            JsonObjectConst item = items[i].as<JsonObjectConst>();
+            if (item.isNull()) continue;
+            JsonVariantConst r = getRenderer(item);
+            if (r.isNull()) continue;
+
+            String t = ytmdExtractText(r["title"]);
+            String a = ytmdExtractText(r["shortBylineText"]);
+            if (a.length() == 0) a = ytmdExtractText(r["author"]);
+            if (a.length() == 0) a = ytmdExtractText(r["artist"]);
+
+            dev->queue[dev->queueSize].title = t;
+            dev->queue[dev->queueSize].artist = a;
+            dev->queue[dev->queueSize].album = "";
+            dev->queue[dev->queueSize].duration = "";
+            dev->queue[dev->queueSize].albumArtURL = "";
+            dev->queue[dev->queueSize].trackNumber = i + 1;  // 1-based
+            dev->queueSize++;
+        }
+
+        // If playlist screen is open, repaint from the updated cache.
+        if (lv_screen_active() == scr_queue) {
+            refreshQueueList();
+        }
+    }
+
+    if (selectedPos < 0 || selectedPos + 1 >= (int)items.size()) {
+        YTMD_QUEUE_LOG("[YTMD/QUEUE] selected=%d items=%d (no next)\n", selectedPos, (int)items.size());
+        applyYtmdNextTrackLine("");
+        return true;
+    }
+
+    JsonObjectConst nextItem = items[selectedPos + 1].as<JsonObjectConst>();
+    JsonVariantConst nr = getRenderer(nextItem);
+    if (nr.isNull()) {
+        applyYtmdNextTrackLine("");
+        return true;
+    }
+
+    String title = ytmdExtractText(nr["title"]);
+    String artist = ytmdExtractText(nr["shortBylineText"]);
+    String line = title;
+    if (artist.length() > 0) {
+        if (line.length() > 0) line += " - ";
+        line += artist;
+    }
+    static String s_last_queue_log_line = "";
+    if (line != s_last_queue_log_line) {
+        YTMD_QUEUE_LOG("[YTMD/QUEUE] next: %s\n", line.c_str());
+        s_last_queue_log_line = line;
+    }
+    applyYtmdNextTrackLine(line);
+    return true;
 }
 
 static String nextRepeatMode(const String& current) {
@@ -632,10 +857,10 @@ void ev_progress(lv_event_t* e) {
         if (isYtmdMode()) {
             if (ytmd_duration_seconds > 0) {
                 int seekSec = (lv_slider_get_value(slider_progress) * ytmd_duration_seconds) / 100;
-                Serial.printf("[YTMD/SEEK] slider=%d dur=%d seek=%d\n",
-                              lv_slider_get_value(slider_progress),
-                              ytmd_duration_seconds,
-                              seekSec);
+                YTMD_CMD_LOG("[YTMD/SEEK] slider=%d dur=%d seek=%d\n",
+                             lv_slider_get_value(slider_progress),
+                             ytmd_duration_seconds,
+                             seekSec);
                 char body[32];
                 snprintf(body, sizeof(body), "{\"seconds\":%d}", seekSec);
                 ytmdApiPost("/api/v1/seek-to", body);
@@ -668,13 +893,13 @@ void ev_vol_slider(lv_event_t* e) {
             ui_vol = vol;  // optimistic UI sync; server poll will correct if needed
             s_ytmd_local_volume_target = vol;
             s_ytmd_local_volume_set_ms = millis();
-            Serial.printf("[VOL] YTMD set request: vol=%d event=%d\n", vol, (int)code);
+            YTMD_CMD_LOG("[VOL] YTMD set request: vol=%d event=%d\n", vol, (int)code);
             char body[24];
             snprintf(body, sizeof(body), "{\"volume\":%d}", vol);
             ytmdApiPost("/api/v1/volume", body);
         } else {
             int vol = lv_slider_get_value(slider_vol);
-            Serial.printf("[VOL] Sonos set request: vol=%d event=%d\n", vol, (int)code);
+            YTMD_CMD_LOG("[VOL] Sonos set request: vol=%d event=%d\n", vol, (int)code);
             sonos.setVolume(lv_slider_get_value(slider_vol));
         }
         dragging_vol = false;
@@ -715,20 +940,24 @@ void ev_devices(lv_event_t* e) {
 }
 
 void ev_queue(lv_event_t* e) {
-    // Show cached data immediately, then request a fresh windowed fetch.
-    // The polling task picks up queue_fetch_requested and calls updateQueue(startIndex)
-    // on its next cycle (safe: no SOAP on UI thread).
+    // Show cached data immediately.
+    // Sonos: request a fresh windowed fetch in polling task (no SOAP on UI thread).
+    // YTMD: request lightweight queue refresh via YTMD polling path.
     SonosDevice* d = sonos.getCurrentDevice();
-    int start = 0;
-    if (d && d->currentTrackNumber > 0) {
-        start = d->currentTrackNumber - SONOS_QUEUE_BATCH_SIZE / 2;
-        if (start < 0) start = 0;
-        if (d->totalTracks > 0 && start + SONOS_QUEUE_BATCH_SIZE > d->totalTracks)
-            start = d->totalTracks - SONOS_QUEUE_BATCH_SIZE;
-        if (start < 0) start = 0;
+    if (isYtmdMode()) {
+        ytmd_queue_fetch_requested = true;
+    } else {
+        int start = 0;
+        if (d && d->currentTrackNumber > 0) {
+            start = d->currentTrackNumber - SONOS_QUEUE_BATCH_SIZE / 2;
+            if (start < 0) start = 0;
+            if (d->totalTracks > 0 && start + SONOS_QUEUE_BATCH_SIZE > d->totalTracks)
+                start = d->totalTracks - SONOS_QUEUE_BATCH_SIZE;
+            if (start < 0) start = 0;
+        }
+        queue_fetch_start_index = start;
+        queue_fetch_requested   = true;
     }
-    queue_fetch_start_index = start;
-    queue_fetch_requested   = true;
     refreshQueueList();
     lv_screen_load(scr_queue);
 }
@@ -2260,6 +2489,8 @@ static void maybePollYtmdArtFallback() {
     static unsigned long lastPollMs = 0;
     static unsigned long lastVolPollMs = 0;
     static unsigned long lastCtlPollMs = 0;
+    static unsigned long lastNextPollMs = 0;
+    static String lastNextTrackKey = "";
     static String lastRequestedYtmdArt = "";
     static String lastProgressTrackKey = "";
     static uint32_t noDeviceLogGate = 0;
@@ -2273,6 +2504,8 @@ static void maybePollYtmdArtFallback() {
     static const uint32_t kBackoffMs[] = {3000, 10000, 30000, 60000};
     static const uint32_t kVolumePollMs = 1200;
     static const uint32_t kControlPollMs = 1500;
+    // /queue can be heavy; prioritize track-change refresh and keep periodic sync sparse.
+    static const uint32_t kNextPollMs = 60000;
 
     const uint32_t now = millis();
 
@@ -2429,7 +2662,7 @@ static void maybePollYtmdArtFallback() {
             DeserializationOption::NestingLimit(48)
         );
         if (err) {
-            Serial.printf("[YTMD/FB] JSON parse error: %s\n", err.c_str());
+            YTMD_FB_LOG("[YTMD/FB] JSON parse error: %s\n", err.c_str());
             continue;
         }
 
@@ -2517,6 +2750,7 @@ static void maybePollYtmdArtFallback() {
             if (t.length() > 0 || a.length() > 0) trackKey = t + "|" + a;
         }
         bool progressTrackChanged = (trackKey.length() > 0 && trackKey != lastProgressTrackKey);
+        bool nextTrackChanged = (trackKey.length() > 0 && trackKey != lastNextTrackKey);
 
         // Duration parsing (numeric, string time, sec/ms variants).
         // Prefer flat root keys first to match known-good YTMD controller behavior.
@@ -2644,6 +2878,18 @@ static void maybePollYtmdArtFallback() {
         if (repeatMode) {
             String rm(repeatMode);
             if (rm != ui_repeat) applyYtmdRepeatMode(rm);
+        }
+
+        // Next track line / YTMD playlist cache:
+        // refresh on track change, explicit queue-screen request, or sparse periodic sync.
+        bool queueRefreshRequested = ytmd_queue_fetch_requested;
+        if (queueRefreshRequested || nextTrackChanged || (now - lastNextPollMs >= kNextPollMs)) {
+            bool queueOk = pollAndApplyYtmdNextTrack(auth);
+            if (queueOk) {
+                lastNextPollMs = now;
+                if (trackKey.length() > 0) lastNextTrackKey = trackKey;
+                ytmd_queue_fetch_requested = false;
+            }
         }
 
         // Album art

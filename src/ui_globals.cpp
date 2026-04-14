@@ -175,6 +175,7 @@ volatile unsigned long last_transient_500_ms = 0; // Set by sendSOAP() on 500; 3
 // On-demand queue window fetch (set by ev_queue / refresh button; consumed by polling task)
 volatile bool queue_fetch_requested   = false;
 volatile int  queue_fetch_start_index = 0;    // 0-based SOAP StartingIndex for the window
+volatile bool ytmd_queue_fetch_requested = false;
 
 // ============================================================================
 // UI State

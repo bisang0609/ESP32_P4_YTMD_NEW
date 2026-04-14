@@ -13,8 +13,10 @@ static bool g_fonts_ready = false;
 static bool g_runtime_fonts_ready = false;
 static lv_font_t * g_font_kr_32 = nullptr;
 static lv_font_t * g_font_kr_16 = nullptr;
+static lv_font_t * g_font_kr_12 = nullptr;
 static lv_font_t * g_font_jp_32 = nullptr;
 static lv_font_t * g_font_jp_16 = nullptr;
+static lv_font_t * g_font_jp_12 = nullptr;
 
 #if LV_USE_TINY_TTF
 static uint8_t * g_font_kr_blob = nullptr;
@@ -87,9 +89,9 @@ static void destroy_tiny_ttf_font(lv_font_t ** font)
 }
 
 static bool create_tiny_ttf_set(const uint8_t * blob, size_t blob_size,
-                                lv_font_t ** out_32, lv_font_t ** out_16)
+                                lv_font_t ** out_32, lv_font_t ** out_16, lv_font_t ** out_12)
 {
-    if(blob == nullptr || blob_size == 0 || out_32 == nullptr || out_16 == nullptr) {
+    if(blob == nullptr || blob_size == 0 || out_32 == nullptr || out_16 == nullptr || out_12 == nullptr) {
         return false;
     }
 
@@ -98,11 +100,14 @@ static bool create_tiny_ttf_set(const uint8_t * blob, size_t blob_size,
     // under LVGL tiny_ttf on constrained runtime heaps.
     *out_32 = lv_tiny_ttf_create_data_ex(blob, blob_size, 30, LV_FONT_KERNING_NORMAL, 20);
     *out_16 = lv_tiny_ttf_create_data_ex(blob, blob_size, 18, LV_FONT_KERNING_NORMAL, 16);
+    // Next/playlist small font: no glyph cache (0) to reduce allocation pressure.
+    *out_12 = lv_tiny_ttf_create_data_ex(blob, blob_size, 12, LV_FONT_KERNING_NORMAL, 0);
 
-    if(*out_32 && *out_16) return true;
+    if(*out_32 && *out_16 && *out_12) return true;
 
     destroy_tiny_ttf_font(out_32);
     destroy_tiny_ttf_font(out_16);
+    destroy_tiny_ttf_font(out_12);
     return false;
 }
 #endif
@@ -116,7 +121,7 @@ static void set_default_metadata_font_chain(void)
 {
     ui_font_title_chain = lv_font_montserrat_32;
     ui_font_artist_chain = lv_font_montserrat_16;
-    ui_font_next_title_chain = lv_font_montserrat_14;
+    ui_font_next_title_chain = lv_font_montserrat_12;
     ui_font_next_artist_chain = lv_font_montserrat_12;
 }
 
@@ -140,7 +145,7 @@ bool ui_metadata_fonts_init(void)
             Serial.printf("[FONT] Loaded KR runtime font: %s (%u bytes)\n", font_kr_path, static_cast<unsigned>(g_font_kr_blob_size));
             if(g_font_kr_32 == nullptr) {
                 create_tiny_ttf_set(g_font_kr_blob, g_font_kr_blob_size,
-                                    &g_font_kr_32, &g_font_kr_16);
+                                    &g_font_kr_32, &g_font_kr_16, &g_font_kr_12);
             }
         } else {
             Serial.printf("[FONT] Failed to read KR font from SPIFFS: %s\n", font_kr_path);
@@ -152,24 +157,28 @@ bool ui_metadata_fonts_init(void)
             Serial.printf("[FONT] Loaded JP runtime font: %s (%u bytes)\n", font_jp_path, static_cast<unsigned>(g_font_jp_blob_size));
             if(g_font_jp_32 == nullptr) {
                 create_tiny_ttf_set(g_font_jp_blob, g_font_jp_blob_size,
-                                    &g_font_jp_32, &g_font_jp_16);
+                                    &g_font_jp_32, &g_font_jp_16, &g_font_jp_12);
             }
         } else {
             Serial.printf("[FONT] Failed to read JP font from SPIFFS: %s\n", font_jp_path);
         }
     }
 
-    if(g_font_kr_32 && g_font_kr_16) {
-        if(g_font_jp_32 && g_font_jp_16) {
+    if(g_font_kr_32 && g_font_kr_16 && g_font_kr_12) {
+        if(g_font_jp_32 && g_font_jp_16 && g_font_jp_12) {
             g_font_kr_32->fallback = g_font_jp_32;
             g_font_kr_16->fallback = g_font_jp_16;
+            g_font_kr_12->fallback = g_font_jp_12;
         }
 
         ui_font_title_chain.fallback = g_font_kr_32;
         ui_font_artist_chain.fallback = g_font_kr_16;
+        // Next/Playlist use a dedicated smaller KR/JP chain.
+        ui_font_next_title_chain.fallback = g_font_kr_12;
+        ui_font_next_artist_chain.fallback = g_font_kr_12;
         g_runtime_fonts_ready = true;
         g_fonts_ready = true;
-        Serial.printf("[FONT] Runtime TTF ready (title/artist only, reduced tiny_ttf cache)\n");
+        Serial.printf("[FONT] Runtime TTF ready (title/artist + next/playlist small)\n");
         return true;
     }
 #endif

@@ -137,6 +137,8 @@ extern volatile unsigned long last_transient_500_ms;
 // On-demand queue window fetch
 extern volatile bool queue_fetch_requested;
 extern volatile int  queue_fetch_start_index;
+// YTMD queue refresh request (consumed by YTMD polling path)
+extern volatile bool ytmd_queue_fetch_requested;
 
 // UI state
 extern String ui_title, ui_artist, ui_repeat;

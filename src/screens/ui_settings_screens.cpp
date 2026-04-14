@@ -6,6 +6,7 @@
 
 #include "ui_common.h"
 #include "config.h"
+#include "ui_metadata_font.h"
 
 // Forward declaration for sidebar (now in ui_sidebar.cpp)
 lv_obj_t* createSettingsSidebar(lv_obj_t* screen, int activeIdx);
@@ -71,19 +72,19 @@ void refreshQueueList() {
         lv_obj_t* title = lv_label_create(btn);
         lv_label_set_text(title, item->title.c_str());
         lv_obj_set_style_text_color(title, isPlaying ? COL_ACCENT : COL_TEXT, 0);
-        lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_font(title, &ui_font_next_title_chain, 0);
         lv_obj_set_width(title, 610);
         lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
-        lv_obj_align(title, LV_ALIGN_LEFT_MID, 45, -11);
+        lv_obj_align(title, LV_ALIGN_LEFT_MID, 45, -10);
 
         // Artist - subtle gray
         lv_obj_t* artist = lv_label_create(btn);
         lv_label_set_text(artist, item->artist.c_str());
         lv_obj_set_style_text_color(artist, COL_TEXT2, 0);
-        lv_obj_set_style_text_font(artist, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_font(artist, &ui_font_next_artist_chain, 0);
         lv_obj_set_width(artist, 610);
         lv_label_set_long_mode(artist, LV_LABEL_LONG_DOT);
-        lv_obj_align(artist, LV_ALIGN_LEFT_MID, 45, 11);
+        lv_obj_align(artist, LV_ALIGN_LEFT_MID, 45, 10);
     }
 }
 
@@ -118,6 +119,10 @@ void createQueueScreen() {
     lv_obj_add_event_cb(btn_refresh, [](lv_event_t* e) {
         // Request a windowed fetch from the polling task (safe: no SOAP on UI thread).
         SonosDevice* d = sonos.getCurrentDevice();
+        if (d && d->rinconID == "YTMD_VIRTUAL") {
+            ytmd_queue_fetch_requested = true;
+            return;
+        }
         int start = 0;
         if (d && d->currentTrackNumber > 0) {
             start = d->currentTrackNumber - SONOS_QUEUE_BATCH_SIZE / 2;

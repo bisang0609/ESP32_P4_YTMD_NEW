@@ -369,7 +369,8 @@ void createMainScreen() {
     lv_obj_add_event_cb(slider_vol, ev_vol_slider, LV_EVENT_ALL, NULL);
 
     // ===== PLAY NEXT SECTION (below volume) =====
-    int next_y = 440;
+    // Keep enough vertical room for CJK glyph ascenders/descenders.
+    int next_y = 428;
 
     // Small album art for next track (hidden for now)
     img_next_album = lv_img_create(panel_right);
@@ -391,8 +392,11 @@ void createMainScreen() {
     lv_obj_set_pos(lbl_next_title, 55, next_y);
     lv_label_set_text(lbl_next_title, "");
     lv_obj_set_style_text_color(lbl_next_title, COL_TEXT, 0);
-    lv_obj_set_style_text_font(lbl_next_title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(lbl_next_title, &ui_font_next_title_chain, 0);
     lv_obj_set_width(lbl_next_title, 275);
+    lv_obj_set_height(lbl_next_title, 24);
+    lv_obj_set_style_pad_top(lbl_next_title, 2, 0);
+    lv_obj_set_style_pad_bottom(lbl_next_title, 1, 0);
     lv_label_set_long_mode(lbl_next_title, LV_LABEL_LONG_SCROLL_CIRCULAR);
     // Make it clickable to play next track
     lv_obj_add_flag(lbl_next_title, LV_OBJ_FLAG_CLICKABLE);
@@ -404,11 +408,13 @@ void createMainScreen() {
 
     // Next track artist - also clickable
     lbl_next_artist = lv_label_create(panel_right);
-    lv_obj_set_pos(lbl_next_artist, 55, next_y + 18);
+    lv_obj_set_pos(lbl_next_artist, 55, next_y + 30);
     lv_label_set_text(lbl_next_artist, "");
     lv_obj_set_style_text_color(lbl_next_artist, COL_TEXT2, 0);
-    lv_obj_set_style_text_font(lbl_next_artist, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(lbl_next_artist, &ui_font_next_artist_chain, 0);
     lv_obj_set_width(lbl_next_artist, 275);
+    lv_obj_set_height(lbl_next_artist, 20);
+    lv_obj_set_style_pad_top(lbl_next_artist, 2, 0);
     lv_label_set_long_mode(lbl_next_artist, LV_LABEL_LONG_SCROLL_CIRCULAR);
     // Make it clickable to play next track
     lv_obj_add_flag(lbl_next_artist, LV_OBJ_FLAG_CLICKABLE);
