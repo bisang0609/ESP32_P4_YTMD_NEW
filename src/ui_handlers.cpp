@@ -71,24 +71,12 @@ static float         s_ytmd_elapsed_sec  = 0.0f;
 static int           s_ytmd_dur_sec      = 0;
 static bool          s_ytmd_is_playing   = false;
 static unsigned long s_ytmd_pos_ts       = 0;   // millis() when elapsed was last polled
-// Local volume-set guard: prevents stale GET /volume from immediately snapping
-// the slider back after a successful user drag+release POST.
-static unsigned long s_ytmd_local_volume_set_ms = 0;
-static int           s_ytmd_local_volume_target = -1;
-// Some pear-desktop builds can report GET /volume.state as fixed 100 even after
-// successful POST /volume. Detect that pattern and stop forcing slider to max.
-static bool          s_ytmd_volume_sync_suspect = false;
-static uint8_t       s_ytmd_stuck100_hits = 0;
 // This backend currently does not expose /api/v1/queue/next.
 // Keep disabled to avoid periodic 404s; parse /api/v1/queue directly.
 static bool          s_ytmd_queue_next_supported = false;
 
 #ifndef YTMD_FB_VERBOSE_LOGS
 #define YTMD_FB_VERBOSE_LOGS 0
-#endif
-
-#ifndef YTMD_VOL_DEBUG
-#define YTMD_VOL_DEBUG 0
 #endif
 
 #ifndef YTMD_CMD_DEBUG
@@ -105,12 +93,6 @@ static bool          s_ytmd_queue_next_supported = false;
 #else
 #define YTMD_FB_LOG(...) do {} while (0)
 #define YTMD_FB_LOG_LN(msg) do {} while (0)
-#endif
-
-#if YTMD_VOL_DEBUG
-#define YTMD_VOL_LOG(...) Serial.printf(__VA_ARGS__)
-#else
-#define YTMD_VOL_LOG(...) do {} while (0)
 #endif
 
 #if YTMD_CMD_DEBUG
@@ -217,201 +199,6 @@ static void formatTimeLabel(int totalSec, char* out, size_t outSize, bool withMi
     else snprintf(out, outSize, "%s%d:%02d", sign, m, s);
 }
 
-// Parse /api/v1/volume response.
-// pear-desktop commonly returns: { "state": <0..100>, "isMuted": <bool> }
-// but field names can vary by build, so we accept several shapes/keys.
-static bool parseYtmdVolumeStateResponse(const String& resp, int* outVolume, bool* outMuted) {
-    if (!outVolume || !outMuted) return false;
-
-    DynamicJsonDocument doc(256);
-    DeserializationError err = deserializeJson(doc, resp);
-    if (err) return false;
-
-    JsonVariantConst root = doc.as<JsonVariantConst>();
-    float volumeNum = 0.0f;
-    bool hasVolume = false;
-    bool hasMuted = false;
-    bool isMuted = ui_muted;
-
-    auto tryVolume = [&](JsonVariantConst v) {
-        if (hasVolume || v.isNull()) return;
-
-        float tmp = 0.0f;
-        if (parseJsonSeconds(v, &tmp)) {
-            volumeNum = tmp;
-            hasVolume = true;
-            return;
-        }
-
-        if (v.is<JsonObjectConst>()) {
-            JsonVariantConst o = v;
-            if (parseJsonSeconds(o["state"], &tmp) ||
-                parseJsonSeconds(o["volume"], &tmp) ||
-                parseJsonSeconds(o["value"], &tmp) ||
-                parseJsonSeconds(o["level"], &tmp) ||
-                parseJsonSeconds(o["percent"], &tmp)) {
-                volumeNum = tmp;
-                hasVolume = true;
-            }
-        }
-    };
-
-    auto tryMuted = [&](JsonVariantConst v) {
-        if (hasMuted || v.isNull()) return;
-
-        if (v.is<JsonObjectConst>()) {
-            JsonVariantConst o = v;
-            if (!o["isMuted"].isNull()) {
-                isMuted = parseJsonBoolFlexible(o["isMuted"], isMuted);
-                hasMuted = true;
-            } else if (!o["muted"].isNull()) {
-                isMuted = parseJsonBoolFlexible(o["muted"], isMuted);
-                hasMuted = true;
-            } else if (!o["mute"].isNull()) {
-                isMuted = parseJsonBoolFlexible(o["mute"], isMuted);
-                hasMuted = true;
-            } else if (!o["is_muted"].isNull()) {
-                isMuted = parseJsonBoolFlexible(o["is_muted"], isMuted);
-                hasMuted = true;
-            }
-            return;
-        }
-
-        isMuted = parseJsonBoolFlexible(v, isMuted);
-        hasMuted = true;
-    };
-
-    // Prefer explicit volume keys first, then broader fallbacks.
-    tryVolume(root);
-    tryVolume(root["volume"]);
-    tryVolume(root["value"]);
-    tryVolume(root["level"]);
-    tryVolume(root["percent"]);
-    tryVolume(root["state"]);
-    tryVolume(root["data"]);
-    tryVolume(root["data"]["volume"]);
-    tryVolume(root["data"]["value"]);
-    tryVolume(root["data"]["state"]);
-    tryVolume(root["data"]["player"]);
-    tryVolume(root["data"]["player"]["volume"]);
-    tryVolume(root["player"]);
-    tryVolume(root["player"]["volume"]);
-    tryVolume(root["player"]["value"]);
-    tryVolume(root["player"]["state"]);
-
-    tryMuted(root["isMuted"]);
-    tryMuted(root["muted"]);
-    tryMuted(root["mute"]);
-    tryMuted(root["is_muted"]);
-    tryMuted(root["data"]);
-    tryMuted(root["player"]);
-
-    if (!hasVolume && !hasMuted) return false;
-
-    int volume = ui_vol >= 0 ? ui_vol : 0;
-    if (hasVolume) {
-        // Some endpoints return 0..1 instead of 0..100.
-        // Accept 0..1 fractional values from some builds, but keep exact "1"
-        // as 1% for strict 0..100 endpoints that report integer percentages.
-        if (volumeNum > 0.0f && volumeNum < 1.0f) volumeNum *= 100.0f;
-        int rounded = (int)(volumeNum + 0.5f);
-        volume = constrain(rounded, 0, 100);
-    }
-
-    *outVolume = volume;
-    *outMuted = isMuted;
-    return true;
-}
-
-// Poll current volume from pear-desktop and mirror it into the UI state.
-static void pollAndApplyYtmdVolumeState(const char* authHeader) {
-    if (!authHeader || !authHeader[0]) return;
-
-    char url[192];
-    snprintf(url, sizeof(url), "http://%s:%d/api/v1/volume",
-             ytmd_ip.c_str(),
-             (ytmd_port > 0 ? ytmd_port : YTMD_DEFAULT_PORT));
-
-    HTTPClient http;
-    http.begin(url);
-    http.addHeader("Authorization", authHeader);
-    // Keep short to minimize UI-thread blocking when desktop app is unreachable.
-    http.setTimeout(450);
-
-    int code = http.GET();
-    if (code != 200) {
-        YTMD_VOL_LOG("[YTMD/VOL] GET /volume -> HTTP %d\n", code);
-        YTMD_FB_LOG("[YTMD/FB] GET %s -> HTTP %d\n", url, code);
-        http.end();
-        return;
-    }
-
-    String resp = http.getString();
-    http.end();
-    YTMD_VOL_LOG("[YTMD/VOL] body: %.200s\n", resp.c_str());
-
-    int serverVolume = ui_vol >= 0 ? ui_vol : 0;
-    bool serverMuted = ui_muted;
-    if (!parseYtmdVolumeStateResponse(resp, &serverVolume, &serverMuted)) {
-        YTMD_VOL_LOG("[YTMD/VOL] parse failed\n");
-        YTMD_FB_LOG("[YTMD/FB] /volume parse failed: %.180s\n", resp.c_str());
-        return;
-    }
-    YTMD_VOL_LOG("[YTMD/VOL] parsed: vol=%d muted=%d ui_vol=%d dragging=%d suspect=%d target=%d\n",
-                 serverVolume, (int)serverMuted, ui_vol, (int)dragging_vol,
-                 (int)s_ytmd_volume_sync_suspect, s_ytmd_local_volume_target);
-
-    // If user just set volume, tolerate a short server propagation delay.
-    // This avoids snapping back to a stale value (commonly 100) right after drag.
-    const unsigned long now = millis();
-    if (s_ytmd_local_volume_target >= 0) {
-        if (serverVolume == s_ytmd_local_volume_target) {
-            s_ytmd_local_volume_target = -1;
-        } else if ((now - s_ytmd_local_volume_set_ms) < 1600) {
-            return;
-        } else {
-            s_ytmd_local_volume_target = -1;
-        }
-    }
-
-    // Detect broken /volume state feedback (stuck at 100 while local ui_vol is not high).
-    // This keeps UI stable instead of snapping back to max every poll.
-    if (!dragging_vol && ui_vol >= 0 && ui_vol <= 95) {
-        if (serverVolume == 100) {
-            if (s_ytmd_stuck100_hits < 255) s_ytmd_stuck100_hits++;
-            if (s_ytmd_stuck100_hits >= 3 && !s_ytmd_volume_sync_suspect) {
-                s_ytmd_volume_sync_suspect = true;
-                YTMD_VOL_LOG("[YTMD/VOL] state appears stuck at 100; suppressing forced slider sync\n");
-            }
-        } else {
-            s_ytmd_stuck100_hits = 0;
-            s_ytmd_volume_sync_suspect = false;
-        }
-    } else if (!dragging_vol && serverVolume != 100) {
-        s_ytmd_stuck100_hits = 0;
-        s_ytmd_volume_sync_suspect = false;
-    }
-
-    if (!s_ytmd_volume_sync_suspect) {
-        if (!dragging_vol && slider_vol && serverVolume != ui_vol) {
-            lv_slider_set_value(slider_vol, serverVolume, LV_ANIM_OFF);
-            ui_vol = serverVolume;
-            YTMD_VOL_LOG("[YTMD/VOL] apply slider/ui -> %d\n", serverVolume);
-        } else if (!dragging_vol && ui_vol != serverVolume) {
-            ui_vol = serverVolume;
-            YTMD_VOL_LOG("[YTMD/VOL] apply ui only -> %d\n", serverVolume);
-        }
-    } else {
-        YTMD_VOL_LOG("[YTMD/VOL] sync suppressed (stuck100 suspected)\n");
-    }
-
-    if (serverMuted != ui_muted && btn_mute) {
-        lv_obj_t* lbl = lv_obj_get_child(btn_mute, 0);
-        lv_label_set_text(lbl, serverMuted ? MDI_VOLUME_OFF : MDI_VOLUME_HIGH);
-    }
-    ui_muted = serverMuted;
-}
-
 // POST to pear-desktop API with bearer token authentication.
 // Called from UI task for playback commands — short timeout to avoid touch freeze.
 // Returns HTTP response code (200 = success, negative = connection error).
@@ -492,14 +279,6 @@ static void applyYtmdPlayState(bool isPlaying) {
     if (isPlaying) s_ytmd_pos_ts = millis();
 }
 
-static void applyYtmdMuteState(bool muted) {
-    if (btn_mute) {
-        lv_obj_t* lbl = lv_obj_get_child(btn_mute, 0);
-        if (lbl) lv_label_set_text(lbl, muted ? MDI_VOLUME_OFF : MDI_VOLUME_HIGH);
-    }
-    ui_muted = muted;
-}
-
 static void applyYtmdShuffleState(bool shuffle) {
     if (btn_shuffle) {
         lv_obj_t* lbl = lv_obj_get_child(btn_shuffle, 0);
@@ -560,6 +339,8 @@ static void applyYtmdNextTrackLine(const String& line) {
 // Called from YTMD polling path while network_mutex is already held by caller.
 // Returns true when queue data was successfully fetched/parsing completed.
 static bool pollAndApplyYtmdNextTrack(const char* authHeader) {
+    // Guard: skip immediately if not fully configured — called on UI thread.
+    if (ytmd_ip.length() == 0 || ytmd_token.length() == 0 || WiFi.status() != WL_CONNECTED) return false;
     if (!authHeader || !authHeader[0]) return false;
 
     auto httpGet = [&](const char* path, String* outResp, int* outCode) -> bool {
@@ -572,9 +353,8 @@ static bool pollAndApplyYtmdNextTrack(const char* authHeader) {
         HTTPClient http;
         http.begin(url);
         http.addHeader("Authorization", authHeader);
-        // Queue endpoints can be heavier than /song; keep timeout moderate.
         // Keep short to avoid UI stutter on slow/no response.
-        http.setTimeout(350);
+        http.setTimeout(200);
         int code = http.GET();
         *outCode = code;
         if (code != 200) {
@@ -738,6 +518,8 @@ static String nextRepeatMode(const String& current) {
 // Polls lightweight control-state endpoints so icons stay in sync even when
 // /song payload omits queue/repeat fields.
 static void pollAndApplyYtmdControlStates(const char* authHeader) {
+    // Guard: skip immediately if not fully configured — called on UI thread.
+    if (ytmd_ip.length() == 0 || ytmd_token.length() == 0 || WiFi.status() != WL_CONNECTED) return;
     if (!authHeader || !authHeader[0]) return;
 
     auto getJson = [&](const char* path, String* outResp) -> bool {
@@ -750,7 +532,8 @@ static void pollAndApplyYtmdControlStates(const char* authHeader) {
         HTTPClient http;
         http.begin(url);
         http.addHeader("Authorization", authHeader);
-        http.setTimeout(450);
+        // Short timeout: control endpoints are lightweight; long wait blocks the UI thread.
+        http.setTimeout(200);
         int code = http.GET();
         if (code != 200) {
             http.end();
@@ -878,48 +661,6 @@ void ev_progress(lv_event_t* e) {
     } else if (code == LV_EVENT_CANCEL) {
         dragging_prog = false;
     }
-}
-
-void ev_vol_slider(lv_event_t* e) {
-    lv_event_code_t code = lv_event_get_code(e);
-    if (code == LV_EVENT_PRESSED || code == LV_EVENT_PRESSING) {
-        dragging_vol = true;
-    } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
-        // Apply once per drag gesture (PRESS_LOST can happen when finger exits widget).
-        if (!dragging_vol) return;
-
-        if (isYtmdMode()) {
-            int vol = lv_slider_get_value(slider_vol);
-            ui_vol = vol;  // optimistic UI sync; server poll will correct if needed
-            s_ytmd_local_volume_target = vol;
-            s_ytmd_local_volume_set_ms = millis();
-            YTMD_CMD_LOG("[VOL] YTMD set request: vol=%d event=%d\n", vol, (int)code);
-            char body[24];
-            snprintf(body, sizeof(body), "{\"volume\":%d}", vol);
-            ytmdApiPost("/api/v1/volume", body);
-        } else {
-            int vol = lv_slider_get_value(slider_vol);
-            YTMD_CMD_LOG("[VOL] Sonos set request: vol=%d event=%d\n", vol, (int)code);
-            sonos.setVolume(lv_slider_get_value(slider_vol));
-        }
-        dragging_vol = false;
-    } else if (code == LV_EVENT_CANCEL) {
-        dragging_vol = false;
-    }
-}
-
-void ev_mute(lv_event_t* e) {
-    if (isYtmdMode()) {
-        // pear-desktop API: POST /toggle-mute
-        int code = ytmdApiPostWithFallback("/api/v1/toggle-mute", nullptr,
-                                           "/api/v1/mute-unmute", nullptr);
-        if (code >= 200 && code < 300) {
-            applyYtmdMuteState(!ui_muted);  // optimistic
-        }
-        return;
-    }
-    SonosDevice* d = sonos.getCurrentDevice();
-    if (d) sonos.setMute(!d->isMuted);
 }
 
 void ev_queue_item(lv_event_t* e) {
@@ -2487,7 +2228,6 @@ static bool isYtmdVirtualDevice(const SonosDevice* d) {
 // Uses short timeout + exponential backoff on failure to avoid blocking the UI task.
 static void maybePollYtmdArtFallback() {
     static unsigned long lastPollMs = 0;
-    static unsigned long lastVolPollMs = 0;
     static unsigned long lastCtlPollMs = 0;
     static unsigned long lastNextPollMs = 0;
     static String lastNextTrackKey = "";
@@ -2502,7 +2242,6 @@ static void maybePollYtmdArtFallback() {
     static uint32_t staleElapsedLogGate = 0;
     // Backoff intervals (ms): 3s, 10s, 30s, 60s — caps at 60s after 4+ failures
     static const uint32_t kBackoffMs[] = {3000, 10000, 30000, 60000};
-    static const uint32_t kVolumePollMs = 1200;
     static const uint32_t kControlPollMs = 1500;
     // /queue can be heavy; prioritize track-change refresh and keep periodic sync sparse.
     static const uint32_t kNextPollMs = 60000;
@@ -2535,24 +2274,8 @@ static void maybePollYtmdArtFallback() {
     char auth[300];
     snprintf(auth, sizeof(auth), "Bearer %s", ytmd_token.c_str());
 
-    // Refresh volume independently from /song backoff.
-    if (now - lastVolPollMs >= kVolumePollMs) {
-        if (network_mutex && xSemaphoreTake(network_mutex, pdMS_TO_TICKS(180)) == pdTRUE) {
-            pollAndApplyYtmdVolumeState(auth);
-            xSemaphoreGive(network_mutex);
-            lastVolPollMs = now;
-        }
-    }
-
-    // Refresh shuffle/repeat UI independently from /song payload shape/backoff.
-    if (now - lastCtlPollMs >= kControlPollMs) {
-        if (network_mutex && xSemaphoreTake(network_mutex, pdMS_TO_TICKS(220)) == pdTRUE) {
-            pollAndApplyYtmdControlStates(auth);
-            xSemaphoreGive(network_mutex);
-            lastCtlPollMs = now;
-        }
-    }
-
+    // Backoff check: skip ALL network activity (control poll + song poll) when server is failing.
+    // This prevents repeated UI-thread blocking when the server is unreachable.
     int backoffIdx = consecutiveFailures < 4 ? consecutiveFailures : 3;
     if (now - lastPollMs < kBackoffMs[backoffIdx]) {
         if (now - skipLogGate > 8000) {
@@ -2562,6 +2285,16 @@ static void maybePollYtmdArtFallback() {
         }
         return;
     }
+
+    // Refresh shuffle/repeat UI; only runs when server was recently reachable (not in backoff).
+    if (now - lastCtlPollMs >= kControlPollMs) {
+        if (network_mutex && xSemaphoreTake(network_mutex, pdMS_TO_TICKS(120)) == pdTRUE) {
+            pollAndApplyYtmdControlStates(auth);
+            xSemaphoreGive(network_mutex);
+            lastCtlPollMs = now;
+        }
+    }
+
     lastPollMs = now;
 
     if (!network_mutex || xSemaphoreTake(network_mutex, pdMS_TO_TICKS(120)) != pdTRUE) {
@@ -3248,19 +2981,6 @@ void updateUI() {
         lv_obj_center(lbl);  // MDI icons are optically centered — no offset needed
 
         ui_playing = d->isPlaying;
-    }
-
-    // Volume slider update
-    if (!dragging_vol && d->volume != ui_vol && slider_vol) {
-        lv_slider_set_value(slider_vol, d->volume, LV_ANIM_OFF);
-        ui_vol = d->volume;
-    }
-
-    // Mute button
-    if (d->isMuted != ui_muted && btn_mute) {
-        lv_obj_t* lbl = lv_obj_get_child(btn_mute, 0);
-        lv_label_set_text(lbl, d->isMuted ? MDI_VOLUME_OFF : MDI_VOLUME_HIGH);
-        ui_muted = d->isMuted;
     }
 
     // Shuffle

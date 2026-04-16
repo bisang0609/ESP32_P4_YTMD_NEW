@@ -544,27 +544,6 @@ void SonosController::seek(int seconds) {
     xQueueSend(commandQueue, &cmd, 0);
 }
 
-void SonosController::setVolume(int vol) {
-    vol = constrain(vol, 0, 100);
-    CommandRequest_t cmd = { CMD_SET_VOLUME, vol };
-    xQueueSend(commandQueue, &cmd, 0);
-}
-
-void SonosController::volumeUp(int step) {
-    SonosDevice* d = getCurrentDevice();
-    if (d) setVolume(d->volume + step);
-}
-
-void SonosController::volumeDown(int step) {
-    SonosDevice* d = getCurrentDevice();
-    if (d) setVolume(d->volume - step);
-}
-
-void SonosController::setMute(bool mute) {
-    CommandRequest_t cmd = { CMD_SET_MUTE, mute ? 1 : 0 };
-    xQueueSend(commandQueue, &cmd, 0);
-}
-
 void SonosController::setShuffle(bool enable) {
     CommandRequest_t cmd = { CMD_SET_SHUFFLE, enable ? 1 : 0 };
     xQueueSend(commandQueue, &cmd, 0);
@@ -1098,16 +1077,6 @@ String SonosController::getCurrentTrackInfo() {
     return result;
 }
 
-int SonosController::getVolume() {
-    SonosDevice* d = getCurrentDevice();
-    return d ? d->volume : 0;
-}
-
-bool SonosController::getMute() {
-    SonosDevice* d = getCurrentDevice();
-    return d ? d->isMuted : false;
-}
-
 // ============================================================================
 // State Updates
 // ============================================================================
@@ -1353,24 +1322,6 @@ bool SonosController::updatePlaybackState() {
     return false;
 }
 
-bool SonosController::updateVolume() {
-    String resp = sendSOAP("RenderingControl", "GetVolume", 
-        "<InstanceID>0</InstanceID><Channel>Master</Channel>");
-    if (resp.length() == 0) return false;
-    
-    SonosDevice* dev = getCurrentDevice();
-    if (!dev) return false;
-    
-    if (xSemaphoreTake(deviceMutex, pdMS_TO_TICKS(50))) {
-        String vol = extractXML(resp, "CurrentVolume");
-        if (vol.length() > 0) dev->volume = vol.toInt();
-        xSemaphoreGive(deviceMutex);
-        notifyUI(UPDATE_VOLUME);
-        return true;
-    }
-    return false;
-}
-
 bool SonosController::updateTransportSettings() {
     String resp = sendSOAP("AVTransport", "GetTransportSettings", "<InstanceID>0</InstanceID>");
     if (resp.length() == 0) return false;
@@ -1521,28 +1472,6 @@ void SonosController::processCommand(CommandRequest_t* cmd) {
             sendSOAP("AVTransport", "Previous", "<InstanceID>0</InstanceID>");
             vTaskDelay(pdMS_TO_TICKS(200));
             updateTrackInfo();
-            break;
-
-        case CMD_SET_VOLUME:
-            snprintf(args, sizeof(args),
-                "<InstanceID>0</InstanceID><Channel>Master</Channel><DesiredVolume>%d</DesiredVolume>",
-                cmd->value);
-            sendSOAP("RenderingControl", "SetVolume", args);
-            if (xSemaphoreTake(deviceMutex, pdMS_TO_TICKS(50))) {
-                dev->volume = cmd->value;
-                xSemaphoreGive(deviceMutex);
-            }
-            break;
-
-        case CMD_SET_MUTE:
-            snprintf(args, sizeof(args),
-                "<InstanceID>0</InstanceID><Channel>Master</Channel><DesiredMute>%d</DesiredMute>",
-                cmd->value);
-            sendSOAP("RenderingControl", "SetMute", args);
-            if (xSemaphoreTake(deviceMutex, pdMS_TO_TICKS(50))) {
-                dev->isMuted = (cmd->value == 1);
-                xSemaphoreGive(deviceMutex);
-            }
             break;
 
         case CMD_SET_SHUFFLE: {
@@ -1825,11 +1754,6 @@ void SonosController::pollingTaskFunction(void* param) {
             // Clear previous URI when not on radio
             if (!dev->isRadioStation && previousURI.length() > 0) {
                 previousURI = "";
-            }
-
-            // Volume polling
-            if (tick % POLL_VOLUME_MODULO == 0) {
-                ctrl->updateVolume();
             }
 
             // Transport settings polling

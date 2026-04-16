@@ -63,12 +63,10 @@ lv_obj_t *lbl_time_remaining = nullptr;
 lv_obj_t *btn_play = nullptr;
 lv_obj_t *btn_prev = nullptr;
 lv_obj_t *btn_next = nullptr;
-lv_obj_t *btn_mute = nullptr;
 lv_obj_t *btn_shuffle = nullptr;
 lv_obj_t *btn_repeat = nullptr;
 lv_obj_t *btn_queue = nullptr;
 lv_obj_t *slider_progress = nullptr;
-lv_obj_t *slider_vol = nullptr;
 lv_obj_t *panel_right = nullptr;
 lv_obj_t *panel_art = nullptr;
 lv_obj_t *img_next_album = nullptr;
@@ -183,11 +181,8 @@ volatile bool ytmd_queue_fetch_requested = false;
 String ui_title = "";
 String ui_artist = "";
 String ui_repeat = "";
-int ui_vol = -1;
 bool ui_playing = false;
 bool ui_shuffle = false;
-bool ui_muted = false;
-bool dragging_vol = false;
 bool dragging_prog = false;
 
 // ============================================================================

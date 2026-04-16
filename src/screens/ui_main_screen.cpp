@@ -336,39 +336,7 @@ void createMainScreen() {
     lv_obj_set_style_text_color(ico_rpt, COL_TEXT2, 0);
     lv_obj_center(ico_rpt);
 
-    // ===== VOLUME SLIDER =====
-    int vol_y = 360;
-
-    // Mute button (left) - scale effect
-    btn_mute = lv_btn_create(panel_right);
-    lv_obj_set_size(btn_mute, 40, 40);
-    lv_obj_set_pos(btn_mute, 20, vol_y);
-    lv_obj_set_style_bg_opa(btn_mute, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_radius(btn_mute, 20, 0);
-    lv_obj_set_style_transform_scale_y(btn_mute, 280, LV_STATE_PRESSED);
-    lv_obj_set_style_shadow_width(btn_mute, 0, 0);
-    lv_obj_set_style_transform_scale_x(btn_mute, 280, LV_STATE_PRESSED);
-    lv_obj_set_style_transition(btn_mute, &trans_btn, LV_STATE_PRESSED);
-    lv_obj_set_style_transition(btn_mute, &trans_btn, 0);
-    lv_obj_add_event_cb(btn_mute, ev_mute, LV_EVENT_CLICKED, NULL);
-    lv_obj_t* ico_mute = lv_label_create(btn_mute);
-    lv_label_set_text(ico_mute, MDI_VOLUME_HIGH);
-    lv_obj_set_style_text_font(ico_mute, &lv_font_mdi_32, 0);
-    lv_obj_set_style_text_color(ico_mute, COL_TEXT2, 0);
-    lv_obj_center(ico_mute);
-
-    // Volume slider
-    slider_vol = lv_slider_create(panel_right);
-    lv_obj_set_size(slider_vol, 240, 6);
-    lv_obj_set_pos(slider_vol, 65, vol_y + 17);
-    lv_slider_set_range(slider_vol, 0, 100);
-    lv_obj_set_style_bg_color(slider_vol, COL_BTN, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(slider_vol, COL_TEXT2, LV_PART_INDICATOR);
-    lv_obj_set_style_bg_color(slider_vol, COL_TEXT, LV_PART_KNOB);
-    lv_obj_set_style_pad_all(slider_vol, 4, LV_PART_KNOB);
-    lv_obj_add_event_cb(slider_vol, ev_vol_slider, LV_EVENT_ALL, NULL);
-
-    // ===== PLAY NEXT SECTION (below volume) =====
+    // ===== PLAY NEXT SECTION =====
     // Keep enough vertical room for CJK glyph ascenders/descenders.
     int next_y = 428;
 

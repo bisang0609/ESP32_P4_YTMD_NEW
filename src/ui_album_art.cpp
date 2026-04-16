@@ -368,7 +368,6 @@ static void color_anim_cb(void* var, int32_t t) {
         lv_obj_t* ico = lv_obj_get_child(btn_next, 0);
         if (ico) lv_obj_set_style_text_color(ico, bright, LV_STATE_PRESSED);
     }
-    if (btn_mute) lv_obj_set_style_bg_color(btn_mute, bright, LV_STATE_PRESSED);
     if (btn_shuffle) lv_obj_set_style_bg_color(btn_shuffle, bright, LV_STATE_PRESSED);
     if (btn_repeat) lv_obj_set_style_bg_color(btn_repeat, bright, LV_STATE_PRESSED);
     if (btn_queue) lv_obj_set_style_bg_color(btn_queue, bright, LV_STATE_PRESSED);

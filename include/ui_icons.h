@@ -28,8 +28,6 @@
 #define MDI_SHUFFLE            "\xF3\xB0\x92\x9D"   // U+F049D  mdi-shuffle
 #define MDI_REPEAT             "\xF3\xB0\x91\x96"   // U+F0456  mdi-repeat
 #define MDI_REPEAT_ONCE        "\xF3\xB0\x91\x98"   // U+F0458  mdi-repeat-once
-#define MDI_VOLUME_HIGH        "\xF3\xB0\x95\xBE"   // U+F057E  mdi-volume-high
-#define MDI_VOLUME_OFF         "\xF3\xB0\x96\x81"   // U+F0581  mdi-volume-off  (muted)
 #define MDI_MUSIC_NOTE         "\xF3\xB0\x8E\x87"   // U+F0387  mdi-music-note
 #define MDI_MUSIC_BOX          "\xF3\xB0\x8E\x84"   // U+F0384  mdi-music-box
 #define MDI_PLAYLIST           "\xF3\xB0\x90\x91"   // U+F0411  mdi-playlist-play

@@ -42,7 +42,9 @@
 // =============================================================================
 // WIFI CONFIGURATION
 // =============================================================================
-#define WIFI_INIT_DELAY_MS      2000    // Delay for ESP32-C6 SDIO initialization
+#define WIFI_INIT_DELAY_MS      5000    // Delay for ESP32-C6 SDIO slave cold-start initialization
+                                        // 2000ms was insufficient — C6 SDIO slave needs 4-5s on cold boot
+                                        // before P4 SDIO host begins communication (fixes 0x109 timeout)
 #define WIFI_CONNECT_TIMEOUT_MS 500     // Per-attempt timeout
 #define WIFI_CONNECT_RETRIES    40      // Max connection attempts (40 x 500ms = 20s)
 #define WIFI_MAX_NETWORKS       20      // Max networks to scan/store
@@ -116,7 +118,6 @@
 #define SONOS_DEBOUNCE_MS       400     // Command debounce time
 
 // Polling tick modulos (base interval = 300ms, so N ticks = N * 300ms)
-#define POLL_VOLUME_MODULO      5       // Volume every 1.5s (5 * 300ms)
 #define POLL_TRANSPORT_MODULO   10      // Transport settings every 3s
 #define POLL_QUEUE_MODULO       200     // Queue every 60s (was 100/30s — halved to reduce DMA pressure)
 #define POLL_MEDIA_INFO_MODULO  50      // Radio station info every 15s

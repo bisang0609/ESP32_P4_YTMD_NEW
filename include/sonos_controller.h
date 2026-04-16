@@ -20,8 +20,6 @@ typedef enum {
     CMD_PAUSE,
     CMD_NEXT,
     CMD_PREV,
-    CMD_SET_VOLUME,
-    CMD_SET_MUTE,
     CMD_SET_SHUFFLE,
     CMD_SET_REPEAT,
     CMD_SEEK,
@@ -42,7 +40,6 @@ typedef struct {
 typedef enum {
     UPDATE_TRACK_INFO,
     UPDATE_PLAYBACK_STATE,
-    UPDATE_VOLUME,
     UPDATE_TRANSPORT,
     UPDATE_QUEUE,
     UPDATE_ALBUM_ART,
@@ -72,8 +69,6 @@ struct SonosDevice {
 
     // Playback state
     bool isPlaying;
-    int volume;
-    bool isMuted;
     bool shuffleMode;
     String repeatMode;       // "NONE", "ONE", "ALL"
     
@@ -190,19 +185,10 @@ public:
     String extractXMLRange(const String& xml, const char* tag, int rangeStart, int rangeEnd);
     String decodeHTML(String text);
 
-    // Volume control (non-blocking, queued)
-    void setVolume(int volume);
-    void volumeUp(int step = 5);
-    void volumeDown(int step = 5);
-    void setMute(bool mute);
-    int getVolume();
-    bool getMute();
-    
     // State queries (thread-safe)
     bool updateTrackInfo();
     bool updateMediaInfo();          // Get station name for radio from GetMediaInfo
     bool updatePlaybackState();
-    bool updateVolume();
     bool updateQueue(int startIndex = 0);  // startIndex: 0-based SOAP StartingIndex for windowed fetch
     bool updateTransportSettings();
     

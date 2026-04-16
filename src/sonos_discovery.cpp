@@ -79,8 +79,6 @@ int SonosController::discoverDevices() {
                         devices[deviceCount].ip = ip;
                         devices[deviceCount].roomName = ip.toString();
                         devices[deviceCount].isPlaying = false;
-                        devices[deviceCount].volume = 50;
-                        devices[deviceCount].isMuted = false;
                         devices[deviceCount].shuffleMode = false;
                         devices[deviceCount].repeatMode = "NONE";
                         devices[deviceCount].connected = false;
@@ -457,8 +455,6 @@ bool SonosController::tryLoadCachedDevice() {
     devices[0].roomName = cachedRoom;
     devices[0].rinconID = cachedRincon;
     devices[0].isPlaying = false;
-    devices[0].volume = 50;
-    devices[0].isMuted = false;
     devices[0].shuffleMode = false;
     devices[0].repeatMode = "NONE";
     devices[0].connected = false;

@@ -1,0 +1,14 @@
+# ESP32-P4 + C6 SDIO stability fixes
+# Applied via pioarduino sdkconfig.defaults mechanism.
+#
+# NOTE: CONFIG_ESP_HOSTED_SDIO_CLOCK_FREQ_KHZ is defined in the pre-compiled
+# framework-arduinoespressif32-libs (sdkconfig.h, value=40000).
+# This file overrides it for any components compiled from source.
+# To fully enforce 20MHz, rebuild the framework from source with this value.
+
+# Lower SDIO clock from 40MHz → 20MHz (reduces P4+C6 cold-start 0x109 TIMEOUT crash)
+CONFIG_ESP_HOSTED_SDIO_CLOCK_FREQ_KHZ=20000
+
+# mbedTLS buffer reductions (mirrors build_flags — belt-and-suspenders)
+CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=4096
+CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096

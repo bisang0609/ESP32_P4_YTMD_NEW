@@ -80,8 +80,8 @@ extern int ytmd_duration_seconds; // Track duration from last /api/v1/song poll 
 // Main screen UI elements
 extern lv_obj_t *img_album, *lbl_title, *lbl_artist, *lbl_album, *lbl_time, *lbl_time_remaining;
 extern lv_obj_t *lbl_lyrics_status;  // Lyrics status indicator (top of album art)
-extern lv_obj_t *btn_play, *btn_prev, *btn_next, *btn_mute, *btn_shuffle, *btn_repeat, *btn_queue;
-extern lv_obj_t *slider_progress, *slider_vol;
+extern lv_obj_t *btn_play, *btn_prev, *btn_next, *btn_shuffle, *btn_repeat, *btn_queue;
+extern lv_obj_t *slider_progress;
 extern lv_obj_t *panel_right, *panel_art;
 extern lv_obj_t *img_next_album, *lbl_next_title, *lbl_next_artist, *lbl_next_header;
 extern lv_obj_t *lbl_wifi_icon, *lbl_device_name;
@@ -142,9 +142,8 @@ extern volatile bool ytmd_queue_fetch_requested;
 
 // UI state
 extern String ui_title, ui_artist, ui_repeat;
-extern int ui_vol;
-extern bool ui_playing, ui_shuffle, ui_muted;
-extern bool dragging_vol, dragging_prog;
+extern bool ui_playing, ui_shuffle;
+extern bool dragging_prog;
 
 // WiFi state
 extern String selectedSSID;
@@ -209,8 +208,6 @@ void ev_next(lv_event_t *e);
 void ev_shuffle(lv_event_t *e);
 void ev_repeat(lv_event_t *e);
 void ev_progress(lv_event_t *e);
-void ev_vol_slider(lv_event_t *e);
-void ev_mute(lv_event_t *e);
 void ev_devices(lv_event_t *e);
 void ev_queue(lv_event_t *e);
 void ev_settings(lv_event_t *e);
